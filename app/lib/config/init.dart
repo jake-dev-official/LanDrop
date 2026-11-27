@@ -168,7 +168,7 @@ Future<RefenaContainer> preInit(List<String> args) async {
   setDefaultRouteTransition();
 
   final container = RefenaContainer(
-    observers: kDebugMode ? [CustomRefenaObserver()] : [],
+    observers: kDebugMode ? [CustomRefenaObserver()] : [ReleaseNoopRefenaObserver()],
     overrides: [
       persistenceProvider.overrideWithValue(persistenceService),
       deviceRawInfoProvider.overrideWithValue(await getDeviceInfo()),

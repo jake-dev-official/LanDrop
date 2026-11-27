@@ -8,6 +8,7 @@ import 'package:localsend_isolates/model/device.dart';
 import 'package:logging/logging.dart';
 
 final _logger = Logger('WindowsDeviceCache');
+Future<void> _writeChain = Future<void>.value();
 
 String getWindowsDeviceCachePath() {
   final userProfile = Platform.environment['USERPROFILE'] ?? '';
@@ -92,26 +93,32 @@ Future<void> syncWindowsDeviceCache({
   required List<FavoriteDevice> favorites,
   required Map<String, Device> nearbyDevices,
   List<KnownDevice> knownDevices = const [],
-}) async {
+}) {
   if (defaultTargetPlatform != TargetPlatform.windows) {
-    return;
+    return Future<void>.value();
   }
 
-  try {
-    final cachePath = getWindowsDeviceCachePath();
-    final file = File(cachePath);
-    await file.parent.create(recursive: true);
-
-    final payload = buildDeviceCachePayload(
+  final payloadJson = jsonEncode(
+    buildDeviceCachePayload(
       exePath: Platform.resolvedExecutable,
       favorites: favorites,
       nearbyDevices: nearbyDevices,
       knownDevices: knownDevices,
-    );
-    final tmpFile = File('$cachePath.tmp');
-    await tmpFile.writeAsString(jsonEncode(payload), flush: true);
-    await tmpFile.rename(cachePath);
-  } catch (e) {
-    _logger.warning('Failed to sync Windows device cache: $e');
-  }
+    ),
+  );
+
+  _writeChain = _writeChain.then((_) async {
+    try {
+      final cachePath = getWindowsDeviceCachePath();
+      final file = File(cachePath);
+      await file.parent.create(recursive: true);
+
+      final tmpFile = File('$cachePath.tmp');
+      await tmpFile.writeAsString(payloadJson, flush: true);
+      await tmpFile.rename(cachePath);
+    } catch (e) {
+      _logger.warning('Failed to sync Windows device cache: $e');
+    }
+  });
+  return _writeChain;
 }

@@ -1,10 +1,22 @@
+import 'package:localsend_app/config/refena.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/persistence/known_device.dart';
 import 'package:localsend_app/util/native/completion_sound_helper.dart';
 import 'package:localsend_app/util/native/headless_send_helper.dart';
 import 'package:localsend_app/util/native/windows_device_cache.dart';
 import 'package:localsend_isolates/model/device.dart';
+import 'package:refena_flutter/refena_flutter.dart';
 import 'package:test/test.dart';
+
+class _TestCounterNotifier extends ReduxNotifier<int> {
+  @override
+  int init() => 0;
+}
+
+class _IncrementAction extends ReduxAction<_TestCounterNotifier, int> {
+  @override
+  int reduce() => state + 1;
+}
 
 void main() {
   group('parseSendToArgs', () {
@@ -240,6 +252,29 @@ void main() {
       expect(devices[2]['alias'], 'Remembered Phone');
       expect(devices[2]['online'], false);
       expect(devices[2]['favorite'], false);
+    });
+  });
+
+  group('ReleaseNoopRefenaObserver', () {
+    test('keeps ReduxProvider onChanged active when used in RefenaContainer', () {
+      int? observedPrev;
+      int? observedNext;
+      final testProvider = ReduxProvider<_TestCounterNotifier, int>(
+        (ref) => _TestCounterNotifier(),
+        onChanged: (prev, next, ref) {
+          observedPrev = prev;
+          observedNext = next;
+        },
+      );
+
+      final container = RefenaContainer(
+        observers: [ReleaseNoopRefenaObserver()],
+      );
+      addTearDown(() => container.dispose(testProvider));
+
+      container.redux(testProvider).dispatch(_IncrementAction());
+      expect(observedPrev, 0);
+      expect(observedNext, 1);
     });
   });
 }

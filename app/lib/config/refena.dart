@@ -24,6 +24,14 @@ class CustomRefenaObserver extends RefenaMultiObserver {
       );
 }
 
+/// Refena 3.5.0 only invokes provider `onChanged` callbacks when at least one
+/// observer is attached to the [RefenaContainer]. Keep a zero-overhead observer
+/// in release builds so `onChanged` listeners stay active.
+class ReleaseNoopRefenaObserver extends RefenaObserver {
+  @override
+  void handleEvent(RefenaEvent event) {}
+}
+
 bool _exclude(RefenaEvent event) {
   return switch (event) {
     ChangeEvent() => event.notifier is DiscoveryLogger || event.notifier is LocalIpService || event.notifier is FileTransferNotifier,
