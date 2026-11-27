@@ -16,7 +16,6 @@ import 'package:localsend_app/provider/selection/selected_sending_files_provider
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/message_preview.dart';
 import 'package:localsend_app/util/native/channel/android_channel.dart';
-import 'package:localsend_app/util/native/completion_sound_helper.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:localsend_app/util/native/tray_helper.dart';
 import 'package:localsend_app/widget/dialogs/pin_dialog.dart';
@@ -491,15 +490,6 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     // foreground, because Android 12+ rejects starting a foreground service from the background.
     TransferNotification.start(sessionId: sessionId, receiving: false);
 
-    final settings = ref.read(settingsProvider);
-    if (settings.playCompletionSound) {
-      unawaited(
-        playTransferStartSound(
-          preset: settings.soundPreset,
-          customPath: settings.customSoundPath,
-        ),
-      );
-    }
     if (checkPlatform([TargetPlatform.android])) {
       final totalBytes = sendingFiles.values.where((f) => f.token != null).fold<int>(0, (sum, f) => sum + f.file.size);
       _lastAndroidProgressNotif = DateTime.now();
@@ -626,7 +616,6 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
 
     if (state[sessionId]!.status != SessionStatus.sending) {
       _logger.info('Transfer was canceled.');
-      cancelPendingFinishSound();
       if (checkPlatform([TargetPlatform.android])) {
         _lastAndroidProgressNotif = null;
         unawaited(cancelTransferProgressNotificationAndroid());
@@ -634,19 +623,9 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     } else {
       final hasError = ref.read(fileTransferProvider).getStatuses(sessionId).any((status) => status == FileStatus.failed);
       final canceledByReceiver = hasError && sessionState.files.values.any((f) => f.errorMessage?.contains('Cancelled') == true);
-      final settings = ref.read(settingsProvider);
-      if (!hasError && settings.playCompletionSound) {
-        unawaited(
-          playTransferFinishSound(
-            preset: settings.soundPreset,
-            customPath: settings.customSoundPath,
-          ),
-        );
-      }
       if (checkPlatform([TargetPlatform.android])) {
         _lastAndroidProgressNotif = null;
         if (canceledByReceiver) {
-          cancelPendingFinishSound();
           unawaited(cancelTransferProgressNotificationAndroid());
         } else {
           final sentFiles = sessionState.files.values.where((f) => f.token != null).toList();
@@ -861,7 +840,6 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
 
   /// Closes the send-session and sends a cancel event to the receiver.
   void cancelSession(String sessionId) {
-    cancelPendingFinishSound();
     final sessionState = state[sessionId];
     if (sessionState == null) {
       return;
@@ -905,7 +883,6 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   }
 
   void cancelSessionByReceiver(String sessionId) {
-    cancelPendingFinishSound();
     final sessionState = state[sessionId];
     if (sessionState == null) {
       return;
@@ -958,7 +935,6 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   }
 
   void clearAllSessions() {
-    cancelPendingFinishSound();
     if (checkPlatform([TargetPlatform.android])) {
       _lastAndroidProgressNotif = null;
       unawaited(cancelTransferProgressNotificationAndroid());

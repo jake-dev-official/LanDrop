@@ -126,6 +126,117 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
     }
   }
 
+  Future<void> _removeDevice(_UnifiedDevice entry) async {
+    final fp = entry.fingerprint;
+    await ref.redux(knownDevicesProvider).dispatchAsync(RemoveKnownDeviceAction(fp));
+    if (entry.isFavorite) {
+      await ref.redux(favoritesProvider).dispatchAsync(RemoveFavoriteAction(deviceFingerprint: fp));
+    }
+    ref.redux(nearbyDevicesProvider).dispatch(RemoveFoundDeviceAction(fp));
+    if (mounted) {
+      if (_selectedFingerprint == fp) {
+        setState(() {
+          _selectedFingerprint = null;
+        });
+      }
+      context.showSnackBar('Removed ${entry.displayName}');
+    }
+  }
+
+  Future<void> _showDesktopDeviceMenu(BuildContext context, _UnifiedDevice entry, Offset globalPosition) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) {
+      return;
+    }
+    final colorScheme = Theme.of(context).colorScheme;
+    final choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'favorite',
+          child: Row(
+            children: [
+              Icon(
+                entry.isFavorite ? Icons.star : Icons.star_border,
+                size: 18,
+                color: entry.isFavorite ? Colors.amber : null,
+              ),
+              const SizedBox(width: 10),
+              Text(entry.isFavorite ? 'Remove from favorites' : 'Add to favorites'),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'remove',
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline, size: 18, color: colorScheme.error),
+              const SizedBox(width: 10),
+              Text('Remove device', style: TextStyle(color: colorScheme.error)),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (!mounted || choice == null) {
+      return;
+    }
+    if (choice == 'favorite') {
+      await _toggleFavorite(entry);
+    } else if (choice == 'remove') {
+      await _removeDevice(entry);
+    }
+  }
+
+  Future<void> _showMobileDeviceSheet(BuildContext context, _UnifiedDevice entry) async {
+    final colorScheme = Theme.of(context).colorScheme;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    entry.displayName,
+                    style: Theme.of(sheetContext).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: Icon(
+                  entry.isFavorite ? Icons.star : Icons.star_border,
+                  color: entry.isFavorite ? Colors.amber : null,
+                ),
+                title: Text(entry.isFavorite ? 'Remove from favorites' : 'Add to favorites'),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  unawaited(_toggleFavorite(entry));
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.delete_outline, color: colorScheme.error),
+                title: Text('Remove device', style: TextStyle(color: colorScheme.error)),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  unawaited(_removeDevice(entry));
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _openAddressDialogAndSelect({required bool sendImmediatelyIfSelected}) async {
     final device = await showDialog<Device?>(
       context: context,
@@ -323,6 +434,7 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
         onClearSelectedFiles: () => ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction()),
         onTapDevice: (entry) => _sendToDeviceStraight(entry.device),
         onToggleFavorite: _toggleFavorite,
+        onLongPressDevice: (entry) => _showMobileDeviceSheet(context, entry),
         onTapManualIp: () => _openAddressDialogAndSelect(sendImmediatelyIfSelected: true),
         onCancelReceive: () => ref.notifier(serverProvider).cancelSession(),
         onCancelSend: (sessionId) => ref.notifier(sendProvider).cancelSession(sessionId),
@@ -429,6 +541,8 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
                             selected: isSelected,
                             onTap: () => setState(() => _selectedFingerprint = entry.fingerprint),
                             onToggleFavorite: () => _toggleFavorite(entry),
+                            onSecondaryTap: (pos) => unawaited(_showDesktopDeviceMenu(context, entry, pos)),
+                            onLongPress: () => unawaited(_showMobileDeviceSheet(context, entry)),
                           );
                         },
                       ),
@@ -512,6 +626,7 @@ class _MobileView extends StatelessWidget {
   final VoidCallback onClearSelectedFiles;
   final void Function(_UnifiedDevice entry) onTapDevice;
   final void Function(_UnifiedDevice entry) onToggleFavorite;
+  final void Function(_UnifiedDevice entry) onLongPressDevice;
   final VoidCallback onTapManualIp;
   final VoidCallback onCancelReceive;
   final void Function(String sessionId) onCancelSend;
@@ -532,6 +647,7 @@ class _MobileView extends StatelessWidget {
     required this.onClearSelectedFiles,
     required this.onTapDevice,
     required this.onToggleFavorite,
+    required this.onLongPressDevice,
     required this.onTapManualIp,
     required this.onCancelReceive,
     required this.onCancelSend,
@@ -684,6 +800,7 @@ class _MobileView extends StatelessWidget {
                       selected: false,
                       onTap: () => onTapDevice(entry),
                       onToggleFavorite: () => onToggleFavorite(entry),
+                      onLongPress: () => onLongPressDevice(entry),
                     );
                   },
                 ),
@@ -994,12 +1111,16 @@ class _DeviceRowTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onToggleFavorite;
+  final void Function(Offset globalPosition)? onSecondaryTap;
+  final VoidCallback? onLongPress;
 
   const _DeviceRowTile({
     required this.entry,
     required this.selected,
     required this.onTap,
     required this.onToggleFavorite,
+    this.onSecondaryTap,
+    this.onLongPress,
   });
 
   @override
@@ -1007,47 +1128,52 @@ class _DeviceRowTile extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Material(
-        color: selected ? colorScheme.secondaryContainer.withValues(alpha: 0.7) : Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onSecondaryTapDown: onSecondaryTap == null ? null : (details) => onSecondaryTap!(details.globalPosition),
+        child: Material(
+          color: selected ? colorScheme.secondaryContainer.withValues(alpha: 0.7) : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            child: Row(
-              children: [
-                _DeviceAvatar(deviceType: entry.device.deviceType, isOnline: entry.isOnline, radius: 18),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        entry.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
-                      ),
-                      if (!entry.isOnline)
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              child: Row(
+                children: [
+                  _DeviceAvatar(deviceType: entry.device.deviceType, isOnline: entry.isOnline, radius: 18),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Text(
-                          entry.isFavorite ? 'Favorite · Offline' : 'Remembered · Offline',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+                          entry.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
                         ),
-                    ],
+                        if (!entry.isOnline)
+                          Text(
+                            entry.isFavorite ? 'Favorite · Offline' : 'Remembered · Offline',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  tooltip: entry.isFavorite ? 'Remove favorite' : 'Favorite',
-                  onPressed: onToggleFavorite,
-                  icon: Icon(
-                    entry.isFavorite ? Icons.star : Icons.star_border,
-                    size: 18,
-                    color: entry.isFavorite ? Colors.amber : colorScheme.onSurfaceVariant,
+                  IconButton(
+                    tooltip: entry.isFavorite ? 'Remove favorite' : 'Favorite',
+                    onPressed: onToggleFavorite,
+                    icon: Icon(
+                      entry.isFavorite ? Icons.star : Icons.star_border,
+                      size: 18,
+                      color: entry.isFavorite ? Colors.amber : colorScheme.onSurfaceVariant,
+                    ),
+                    visualDensity: VisualDensity.compact,
                   ),
-                  visualDensity: VisualDensity.compact,
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

@@ -143,8 +143,8 @@ class SettingsTab extends StatelessWidget {
                   },
                 ),
                 _BooleanEntry(
-                  label: 'Transfer sounds',
-                  description: 'Play a sound when a transfer starts and when it finishes.',
+                  label: 'Receive sound',
+                  description: 'Play a sound when files finish arriving.',
                   value: vm.settings.playCompletionSound,
                   onChanged: (b) async {
                     await ref.notifier(settingsProvider).setPlayCompletionSound(b);

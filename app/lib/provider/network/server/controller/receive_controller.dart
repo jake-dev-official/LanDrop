@@ -686,15 +686,6 @@ class ReceiveController {
       return;
     }
 
-    final settings = server.ref.read(settingsProvider);
-    if (settings.playCompletionSound) {
-      unawaited(
-        playTransferStartSound(
-          preset: settings.soundPreset,
-          customPath: settings.customSoundPath,
-        ),
-      );
-    }
     if (checkPlatform([TargetPlatform.android])) {
       final totalBytes = updatedSession.files.values.where((f) => fileNameMap.containsKey(f.file.id)).fold<int>(0, (sum, f) => sum + f.file.size);
       _lastAndroidProgressNotif = DateTime.now();
