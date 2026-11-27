@@ -1,10 +1,10 @@
 ; Minimalist Inno Setup script for LanDrop Windows installer (Setup.exe)
 
 #ifndef PayloadDir
-  #define PayloadDir "C:\Users\JAKE\Desktop\LanDrop-Release\LanDrop-1.0.0-Windows-x64"
+  #define PayloadDir GetEnv("USERPROFILE") + "\Desktop\LanDrop-Release\LanDrop-1.0.0-Windows-x64"
 #endif
 #ifndef ResultDir
-  #define ResultDir "C:\Users\JAKE\Desktop\LanDrop-Release"
+  #define ResultDir GetEnv("USERPROFILE") + "\Desktop\LanDrop-Release"
 #endif
 
 #define MyAppName "LanDrop"

@@ -13,15 +13,15 @@ void main() {
         '--hidden',
         '--send-to',
         'FP1234',
-        r'C:\Users\JAKE\Desktop\a.png',
-        r'C:\Users\JAKE\Desktop\folder',
+        r'C:\Users\Example\Desktop\a.png',
+        r'C:\Users\Example\Desktop\folder',
       ]);
 
       expect(parsed, isNotNull);
       expect(parsed!.fingerprint, 'FP1234');
       expect(parsed.paths, [
-        r'C:\Users\JAKE\Desktop\a.png',
-        r'C:\Users\JAKE\Desktop\folder',
+        r'C:\Users\Example\Desktop\a.png',
+        r'C:\Users\Example\Desktop\folder',
       ]);
     });
 

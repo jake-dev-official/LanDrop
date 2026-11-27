@@ -1,6 +1,6 @@
 param(
-    [string]$PayloadDir = "C:\Users\JAKE\Desktop\LanDrop-Release\LanDrop-1.0.0-Windows-x64",
-    [string]$ResultDir = "C:\Users\JAKE\Desktop\LanDrop-Release"
+    [string]$PayloadDir = (Join-Path $env:USERPROFILE "Desktop\LanDrop-Release\LanDrop-1.0.0-Windows-x64"),
+    [string]$ResultDir = (Join-Path $env:USERPROFILE "Desktop\LanDrop-Release")
 )
 
 $ErrorActionPreference = "Stop"
