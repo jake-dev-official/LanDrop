@@ -382,7 +382,7 @@ class LanDropRootCommand final : public IExplorerCommand {
 
     std::vector<IExplorerCommand*> items;
     for (const auto& dev : cache.devices) {
-      std::wstring label = dev.online ? dev.alias : (dev.alias + L" (offline)");
+      std::wstring label = dev.alias;
       auto* cmd = new (std::nothrow)
           LanDropDeviceCommand(std::move(label), dev.fingerprint, exe_path);
       if (cmd != nullptr) {
