@@ -254,9 +254,14 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
   }
 
   Future<void> _dispatchSend(Device target, List<CrossFile> files) async {
+    final busy = ref.read(sendProvider).values.any((s) => s.status == SessionStatus.sending || s.status == SessionStatus.waiting);
     final queued = await ref.notifier(pendingSendProvider).enqueue(target: target, files: files);
     if (queued && mounted) {
-      context.showSnackBar('Queued for ${target.alias} — will send automatically when it connects (5 min)');
+      context.showSnackBar(
+        busy
+            ? 'Queued for ${target.alias} — will send after current transfer finishes'
+            : 'Queued for ${target.alias} — will send automatically when it connects (5 min)',
+      );
     }
   }
 
@@ -434,6 +439,7 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
         onClearSelectedFiles: () => ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction()),
         onTapDevice: (entry) => _sendToDeviceStraight(entry.device),
         onToggleFavorite: _toggleFavorite,
+        onSecondaryTapDevice: (entry, pos) => unawaited(_showDesktopDeviceMenu(context, entry, pos)),
         onLongPressDevice: (entry) => _showMobileDeviceSheet(context, entry),
         onTapManualIp: () => _openAddressDialogAndSelect(sendImmediatelyIfSelected: true),
         onCancelReceive: () => ref.notifier(serverProvider).cancelSession(),
@@ -626,6 +632,7 @@ class _MobileView extends StatelessWidget {
   final VoidCallback onClearSelectedFiles;
   final void Function(_UnifiedDevice entry) onTapDevice;
   final void Function(_UnifiedDevice entry) onToggleFavorite;
+  final void Function(_UnifiedDevice entry, Offset globalPosition) onSecondaryTapDevice;
   final void Function(_UnifiedDevice entry) onLongPressDevice;
   final VoidCallback onTapManualIp;
   final VoidCallback onCancelReceive;
@@ -647,6 +654,7 @@ class _MobileView extends StatelessWidget {
     required this.onClearSelectedFiles,
     required this.onTapDevice,
     required this.onToggleFavorite,
+    required this.onSecondaryTapDevice,
     required this.onLongPressDevice,
     required this.onTapManualIp,
     required this.onCancelReceive,
@@ -800,6 +808,7 @@ class _MobileView extends StatelessWidget {
                       selected: false,
                       onTap: () => onTapDevice(entry),
                       onToggleFavorite: () => onToggleFavorite(entry),
+                      onSecondaryTap: (pos) => onSecondaryTapDevice(entry, pos),
                       onLongPress: () => onLongPressDevice(entry),
                     );
                   },
@@ -1323,7 +1332,9 @@ class _PendingSendBar extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    'Waiting for ${entry.targetAlias} to connect... ($fileCount ${fileCount == 1 ? 'file' : 'files'})',
+                    entry.waitingForBusy
+                        ? 'Queued for ${entry.targetAlias} · waiting for current transfer ($fileCount ${fileCount == 1 ? 'file' : 'files'})'
+                        : 'Waiting for ${entry.targetAlias} to connect... ($fileCount ${fileCount == 1 ? 'file' : 'files'})',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodyMedium,

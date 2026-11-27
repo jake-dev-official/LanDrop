@@ -8,6 +8,7 @@ import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:localsend_app/config/refena.dart';
 import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/assets.gen.dart';
+import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/pages/changelog_page.dart';
 import 'package:localsend_app/pages/home_page.dart';
 import 'package:localsend_app/pages/home_page_controller.dart';
@@ -17,8 +18,10 @@ import 'package:localsend_app/provider/app_arguments_provider.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
 import 'package:localsend_app/provider/known_devices_provider.dart';
+import 'package:localsend_app/provider/local_ip_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/network/pending_send_provider.dart';
+import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
 import 'package:localsend_app/provider/network/webrtc/signaling_provider.dart';
@@ -71,6 +74,7 @@ final _logger = Logger('Init');
 bool _discoveryListenerStarted = false;
 bool _androidCancelHandlerRegistered = false;
 bool _cacheClearedOnce = false;
+Timer? _windowsPresenceTimer;
 
 /// Will be called before the MaterialApp started
 Future<RefenaContainer> preInit(List<String> args) async {
@@ -109,8 +113,9 @@ Future<RefenaContainer> preInit(List<String> args) async {
     supportsDynamicColors: dynamicColors != null,
   );
 
-  if (persistenceService.isFirstAppStart && !persistenceService.isPortableMode()) {
-    await enableContextMenu();
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    // Remove legacy SendTo shortcut; LanDrop uses the Windows 11 shell extension.
+    await disableContextMenu();
   }
 
   await initI18n();
@@ -327,6 +332,14 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
     }
   }
 
+  if (checkPlatform([TargetPlatform.windows])) {
+    unawaited(_refreshWindowsPresence(ref));
+    _windowsPresenceTimer ??= Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_probeWindowsKnownDevices(ref)),
+    );
+  }
+
   // ignore: dead_code
   if (webRTCEnabled) {
     ref.redux(signalingProvider).dispatch(SetupSignalingConnection());
@@ -480,5 +493,59 @@ class _HandleAppStartArgumentsAction extends AsyncGlobalAction {
     if (filesAdded) {
       ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
     }
+  }
+}
+
+Future<void> _refreshWindowsPresence(Ref ref) async {
+  try {
+    await ref.redux(localIpProvider).dispatchAsync(FetchLocalIpAction());
+    await ref.global.dispatchAsync(StartSmartScan());
+  } catch (e) {
+    _logger.fine('Initial Windows presence scan failed: $e');
+  }
+}
+
+Future<void> _probeWindowsKnownDevices(Ref ref) async {
+  try {
+    final nearby = ref.read(nearbyDevicesProvider);
+    if (nearby.runningFavoriteScan) {
+      return;
+    }
+
+    final settings = ref.read(settingsProvider);
+    final favorites = ref.read(favoritesProvider);
+    final known = ref.read(knownDevicesProvider);
+    final probesByFp = <String, FavoriteDevice>{
+      for (final f in favorites) f.fingerprint: f,
+    };
+    for (final k in known) {
+      probesByFp.putIfAbsent(
+        k.fingerprint,
+        () => FavoriteDevice.fromValues(
+          fingerprint: k.fingerprint,
+          ip: k.ip,
+          port: k.port,
+          alias: k.alias,
+        ),
+      );
+    }
+
+    ref.redux(nearbyDevicesProvider).dispatch(StartMulticastScan());
+    if (probesByFp.isEmpty) {
+      return;
+    }
+    await ref
+        .redux(nearbyDevicesProvider)
+        .dispatchAsync(
+          StartStagedScan(
+            favorites: probesByFp.values.toList(),
+            interfaces: const [],
+            port: settings.port,
+            https: settings.https,
+            grace: const Duration(milliseconds: 500),
+          ),
+        );
+  } catch (e) {
+    _logger.fine('Periodic Windows presence probe failed: $e');
   }
 }

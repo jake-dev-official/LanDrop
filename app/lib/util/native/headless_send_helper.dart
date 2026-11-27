@@ -6,7 +6,6 @@ import 'package:localsend_app/provider/favorites_provider.dart';
 import 'package:localsend_app/provider/known_devices_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/network/pending_send_provider.dart';
-import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/native/cross_file_converters.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
@@ -154,8 +153,6 @@ Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
     }
   }
 
-  final bool isOnline = target != null;
-
   if (target == null) {
     final fav = ref.read(favoritesProvider).firstWhereOrNull((e) => e.fingerprint == request.fingerprint);
     if (fav != null) {
@@ -187,15 +184,11 @@ Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
     return;
   }
 
-  if (isOnline) {
-    await ref
-        .notifier(sendProvider)
-        .startSession(
-          target: target,
-          files: files,
-          background: settings.silentCompletion,
-        );
-  } else {
-    await ref.notifier(pendingSendProvider).enqueue(target: target, files: files);
-  }
+  await ref
+      .notifier(pendingSendProvider)
+      .enqueue(
+        target: target,
+        files: files,
+        background: settings.silentCompletion,
+      );
 }

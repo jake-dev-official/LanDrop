@@ -12,6 +12,7 @@ import 'package:localsend_app/provider/device_info_provider.dart';
 import 'package:localsend_app/provider/file_transfer_provider.dart';
 import 'package:localsend_app/provider/http_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
+import 'package:localsend_app/provider/network/pending_send_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/message_preview.dart';
@@ -48,9 +49,15 @@ final _logger = Logger('Send');
 ///
 /// In contrast to [serverProvider], this provider does not manage a server.
 /// Instead, it only does HTTP requests to other servers.
-final sendProvider = NotifierProvider<SendNotifier, Map<String, SendSessionState>>((ref) {
-  return SendNotifier();
-});
+final sendProvider = NotifierProvider<SendNotifier, Map<String, SendSessionState>>(
+  (ref) => SendNotifier(),
+  onChanged: (_, next, ref) {
+    final hasActive = next.values.any((s) => s.status == SessionStatus.sending || s.status == SessionStatus.waiting);
+    if (!hasActive && ref.read(pendingSendProvider).isNotEmpty) {
+      unawaited(Future.microtask(() => ref.notifier(pendingSendProvider).onSendSessionIdle()));
+    }
+  },
+);
 
 class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   DateTime? _lastAndroidProgressNotif;

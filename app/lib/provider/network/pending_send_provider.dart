@@ -7,6 +7,7 @@ import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_isolates/model/device.dart';
+import 'package:localsend_isolates/model/session_status.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:uuid/uuid.dart';
 
@@ -20,6 +21,8 @@ class PendingSendEntry {
   final List<CrossFile> files;
   final DateTime queuedAt;
   final DateTime expiresAt;
+  final bool waitingForBusy;
+  final bool background;
 
   const PendingSendEntry({
     required this.id,
@@ -29,6 +32,8 @@ class PendingSendEntry {
     required this.files,
     required this.queuedAt,
     required this.expiresAt,
+    this.waitingForBusy = false,
+    this.background = true,
   });
 }
 
@@ -50,20 +55,33 @@ class PendingSendNotifier extends Notifier<List<PendingSendEntry>> {
     super.dispose();
   }
 
+  bool _hasActiveSendSession() {
+    return ref
+        .read(sendProvider)
+        .values
+        .any(
+          (s) => s.status == SessionStatus.sending || s.status == SessionStatus.waiting,
+        );
+  }
+
   /// Queues [files] for [target] for up to [ttl] (defaults to 5 minutes).
-  /// Returns `true` if queued to wait, or `false` if [target] was already online and sending began immediately.
+  /// Returns `true` if queued to wait (target offline or another transfer is active),
+  /// or `false` if [target] was online, idle, and sending began immediately.
   Future<bool> enqueue({
     required Device target,
     required List<CrossFile> files,
     Duration ttl = const Duration(minutes: 5),
+    bool background = true,
   }) async {
     if (files.isEmpty) {
       return false;
     }
 
+    final busy = _hasActiveSendSession();
     final online = ref.read(nearbyDevicesProvider).devices[target.fingerprint];
-    if (online != null && (online.ip?.isNotEmpty ?? false)) {
-      await ref.notifier(sendProvider).startSession(target: online, files: files, background: true);
+    final isTargetOnline = online != null && (online.ip?.isNotEmpty ?? false);
+    if (!busy && isTargetOnline) {
+      await ref.notifier(sendProvider).startSession(target: online, files: files, background: background);
       return false;
     }
 
@@ -75,49 +93,102 @@ class PendingSendNotifier extends Notifier<List<PendingSendEntry>> {
       targetDevice: target,
       files: List<CrossFile>.unmodifiable(files),
       queuedAt: now,
-      expiresAt: now.add(ttl),
+      expiresAt: now.add(busy ? const Duration(minutes: 30) : ttl),
+      waitingForBusy: busy && isTargetOnline,
+      background: background,
     );
     state = List<PendingSendEntry>.unmodifiable([...state, entry]);
     _ensureTimer();
-    unawaited(_probePendingDevices());
+    if (!busy) {
+      unawaited(_probePendingDevices());
+    }
     return true;
   }
 
-  void onDeviceOnline(Device device) {
+  void onSendSessionIdle() {
+    if (state.isEmpty || _hasActiveSendSession()) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final valid = state.where((e) => !now.isAfter(e.expiresAt)).toList();
+    if (valid.length != state.length) {
+      state = List<PendingSendEntry>.unmodifiable(valid);
+    }
+    if (valid.isEmpty) {
+      _stopTimer();
+      return;
+    }
+
+    final nearby = ref.read(nearbyDevicesProvider).devices;
+    PendingSendEntry? nextEntry;
+    Device? nextTarget;
+    for (final entry in valid) {
+      final online = nearby[entry.targetFingerprint];
+      if (online != null && (online.ip?.isNotEmpty ?? false)) {
+        nextEntry = entry;
+        nextTarget = online;
+        break;
+      }
+    }
+
+    if (nextEntry == null || nextTarget == null) {
+      return;
+    }
+
+    state = List<PendingSendEntry>.unmodifiable(valid.where((e) => e.id != nextEntry!.id));
     if (state.isEmpty) {
+      _stopTimer();
+    }
+
+    unawaited(
+      ref
+          .notifier(sendProvider)
+          .startSession(
+            target: nextTarget,
+            files: nextEntry.files,
+            background: nextEntry.background,
+          ),
+    );
+  }
+
+  void onDeviceOnline(Device device) {
+    if (state.isEmpty || _hasActiveSendSession()) {
       return;
     }
     final now = DateTime.now();
-    final matched = <PendingSendEntry>[];
-    final remaining = <PendingSendEntry>[];
-
-    for (final entry in state) {
-      if (now.isAfter(entry.expiresAt)) {
-        continue;
+    final valid = state.where((e) => !now.isAfter(e.expiresAt)).toList();
+    final matchIndex = valid.indexWhere((e) => e.targetFingerprint == device.fingerprint);
+    if (matchIndex == -1) {
+      if (valid.length != state.length) {
+        state = List<PendingSendEntry>.unmodifiable(valid);
       }
-      if (entry.targetFingerprint == device.fingerprint) {
-        matched.add(entry);
-      } else {
-        remaining.add(entry);
+      if (state.isEmpty) {
+        _stopTimer();
       }
+      return;
     }
+
+    final matched = valid[matchIndex];
+    final remaining = [
+      for (int i = 0; i < valid.length; i++)
+        if (i != matchIndex) valid[i],
+    ];
 
     state = List<PendingSendEntry>.unmodifiable(remaining);
     if (state.isEmpty) {
       _stopTimer();
     }
 
-    for (final entry in matched) {
-      unawaited(
-        ref
-            .notifier(sendProvider)
-            .startSession(
-              target: device,
-              files: entry.files,
-              background: true,
-            ),
-      );
-    }
+    unawaited(
+      ref
+          .notifier(sendProvider)
+          .startSession(
+            target: device,
+            files: matched.files,
+            background: matched.background,
+          ),
+    );
   }
 
   void cancel(String id) {
@@ -152,11 +223,15 @@ class PendingSendNotifier extends Notifier<List<PendingSendEntry>> {
       return;
     }
 
+    if (_hasActiveSendSession()) {
+      return;
+    }
+
     final nearby = ref.read(nearbyDevicesProvider);
     for (final entry in active) {
       final online = nearby.devices[entry.targetFingerprint];
       if (online != null && (online.ip?.isNotEmpty ?? false)) {
-        onDeviceOnline(online);
+        onSendSessionIdle();
         return;
       }
     }

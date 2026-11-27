@@ -58,6 +58,11 @@ switch ($Action) {
             Add-AppxPackage -Path $msixPath -ExternalLocation $AppDir
         }
 
+        $legacySendTo = Join-Path ([Environment]::GetFolderPath("SendTo")) "LanDrop.lnk"
+        if (Test-Path -LiteralPath $legacySendTo) {
+            Remove-Item -LiteralPath $legacySendTo -Force -ErrorAction SilentlyContinue
+        }
+
         try {
             $ie4uinit = Join-Path $env:SystemRoot "System32\ie4uinit.exe"
             if (Test-Path $ie4uinit) {
