@@ -15,7 +15,7 @@
 #define MyAppMsixHelper "landrop_msix_helper.msix"
 
 [Setup]
-AppId={{8C4F3E19-5B2A-4D7E-9A11-6F8B2E40C3D5}}
+AppId={{8C4F3E19-5B2A-4D7E-9A11-6F8B2E40C3D5}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -59,6 +59,7 @@ FinishedLabel=LanDrop has been installed on your computer.
 FinishedLabelNoIcons=LanDrop has been installed on your computer.
 
 [Files]
+Source: "inno_postinstall.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "{#PayloadDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -76,15 +77,15 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingD
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Check: IsDesktopShortcutChecked
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-NetFirewallRule -Direction Inbound -Action Block -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq 'LanDrop' -or (($_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program -like '*landrop.exe') }} | Remove-NetFirewallRule -ErrorAction SilentlyContinue; @('LanDrop Inbound TCP','LanDrop Inbound UDP') | ForEach-Object {{ Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue }}; New-NetFirewallRule -DisplayName 'LanDrop Inbound TCP' -Direction Inbound -Action Allow -Profile @('Private','Public') -Enabled True -LocalPort 53317 -Protocol TCP -Program '{app}\{#MyAppExeName}' | Out-Null; New-NetFirewallRule -DisplayName 'LanDrop Inbound UDP' -Direction Inbound -Action Allow -Profile @('Private','Public') -Enabled True -LocalPort 53317 -Protocol UDP -Program '{app}\{#MyAppExeName}' | Out-Null"""; Flags: runhidden waituntilterminated; StatusMsg: "Configuring local network access..."
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\inno_postinstall.ps1"" -Action InstallFirewall -AppDir ""{app}"""; Flags: runhidden waituntilterminated; StatusMsg: "Configuring local network access..."
 #ifndef SkipMsixHelper
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Import-Certificate -FilePath '{app}\landrop_signing.cer' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null; Import-Certificate -FilePath '{app}\landrop_signing.cer' -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null; Get-AppxPackage -Name 'LanDrop.App' -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue; Add-AppxPackage -Path '{app}\{#MyAppMsixHelper}' -ExternalLocation '{app}'; $ie = Join-Path $env:SystemRoot 'System32\ie4uinit.exe'; if (Test-Path $ie) {{ & $ie -show | Out-Null }}"""; Flags: runhidden waituntilterminated; Check: IsContextMenuChecked; StatusMsg: "Registering Windows 11 integration..."
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\inno_postinstall.ps1"" -Action InstallShell -AppDir ""{app}"""; Flags: runhidden waituntilterminated; Check: IsContextMenuChecked; StatusMsg: "Registering Windows 11 integration..."
 #endif
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch LanDrop"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-Process -Name landrop -ErrorAction SilentlyContinue | Stop-Process -Force"""; Flags: runhidden waituntilterminated; RunOnceId: "CloseApp"
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$exe = '{app}\{#MyAppExeName}'; $lnk = Join-Path ([Environment]::GetFolderPath('SendTo')) '{#MyAppName}.lnk'; if ((Test-Path -LiteralPath $lnk) -and (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath -eq $exe) {{ Remove-Item -LiteralPath $lnk }}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveSendToShortcut"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$exe = '{app}\{#MyAppExeName}'; $lnk = Join-Path ([Environment]::GetFolderPath('SendTo')) '{#MyAppName}.lnk'; if ((Test-Path -LiteralPath $lnk) -and (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath -eq $exe) {{ Remove-Item -LiteralPath $lnk }"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveSendToShortcut"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-NetFirewallRule -DisplayName 'LanDrop Inbound TCP','LanDrop Inbound UDP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue"""; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode; RunOnceId: "DeleteNamedFirewallRules"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=all program=""{app}\{#MyAppExeName}"""; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode; RunOnceId: "DeleteProgramFirewallRules"
 #ifndef SkipMsixHelper
