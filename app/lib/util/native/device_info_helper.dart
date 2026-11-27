@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:localsend_app/util/native/channel/android_channel.dart';
 import 'package:localsend_isolates/model/device.dart';
 import 'package:localsend_isolates/model/device_info_result.dart';
 import 'package:logging/logging.dart';
@@ -71,6 +72,10 @@ Future<DeviceInfoResult> getDeviceInfo() async {
 Future<String?> getDeviceName() async {
   if (defaultTargetPlatform == TargetPlatform.android) {
     try {
+      final nativeName = (await getDeviceNameAndroid())?.trim();
+      if (nativeName != null && nativeName.isNotEmpty) {
+        return nativeName;
+      }
       final info = await DeviceInfoPlugin().androidInfo;
       final name = info.name.trim();
       if (name.isNotEmpty) {
@@ -87,6 +92,15 @@ Future<String?> getDeviceName() async {
   if (defaultTargetPlatform == TargetPlatform.macOS) {
     final result = await Process.run('scutil', ['--get', 'ComputerName']);
     return result.stdout.toString().trim();
+  }
+
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    final host = Platform.localHostname.trim();
+    if (host.isNotEmpty) {
+      return host;
+    }
+    final envName = Platform.environment['COMPUTERNAME']?.trim();
+    return (envName != null && envName.isNotEmpty) ? envName : null;
   }
 
   return Platform.localHostname;

@@ -110,6 +110,7 @@ flutter:
 
   assets:
     - assets/img/
+    - assets/sound/
     - assets/CHANGELOG.md
 
 flutter_gen:

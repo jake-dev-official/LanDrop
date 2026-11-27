@@ -62,6 +62,10 @@ class ForegroundService {
     _lastText = null;
     _queue.add(() async {
       if (_running) {
+        final updateResult = await FlutterForegroundTask.updateService(notificationTitle: title, notificationText: text);
+        if (updateResult is ServiceRequestFailure) {
+          _logger.warning('Could not update the foreground service', updateResult.error);
+        }
         return;
       }
 
@@ -91,14 +95,14 @@ class ForegroundService {
   ///
   /// The [title] can change while the service runs, because what the service is keeping alive
   /// may change without it ever stopping.
-  static void updateNotification({required String title, required String text}) {
+  static void updateNotification({required String title, required String text, bool force = false}) {
     if (!_isSupported) {
       return;
     }
 
     final now = DateTime.now();
     final lastUpdate = _lastUpdate;
-    if (lastUpdate != null && now.difference(lastUpdate) < _updateInterval) {
+    if (!force && lastUpdate != null && now.difference(lastUpdate) < _updateInterval) {
       return;
     }
     _lastUpdate = now;
@@ -164,8 +168,8 @@ class ForegroundService {
       foregroundTaskOptions: ForegroundTaskOptions(
         // The work happens in the other isolates, so the service has nothing to do on its own.
         eventAction: ForegroundTaskEventAction.nothing(),
-        autoRunOnBoot: false,
-        autoRunOnMyPackageReplaced: false,
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
         allowWakeLock: true,
         allowWifiLock: true,
       ),

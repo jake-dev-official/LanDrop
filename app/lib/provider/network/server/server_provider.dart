@@ -9,7 +9,6 @@ import 'package:localsend_app/provider/network/server/controller/receive_control
 import 'package:localsend_app/provider/network/server/controller/send_controller.dart';
 import 'package:localsend_app/provider/network/server/server_utils.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
-import 'package:localsend_app/util/alias_generator.dart';
 import 'package:localsend_app/util/native/web_pages_loader.dart';
 import 'package:localsend_isolates/constants.dart';
 import 'package:localsend_isolates/isolate.dart';
@@ -125,7 +124,7 @@ class ServerService extends Notifier<ServerState?> {
 
     alias = alias.trim();
     if (alias.isEmpty) {
-      alias = generateRandomAlias();
+      alias = 'LanDrop Device';
     }
 
     if (port < 0 || port > 65535) {

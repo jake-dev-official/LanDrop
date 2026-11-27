@@ -65,9 +65,18 @@ Future<void> _clear(RootIsolateToken token) async {
 }
 
 Future<void> clearTemporaryCacheFiles(Directory cacheDir) async {
+  final now = DateTime.now();
   await for (final event in cacheDir.list()) {
     if (event is File) {
       try {
+        final name = event.path.fileName;
+        if (name.startsWith('landrop_')) {
+          continue;
+        }
+        final stat = await event.stat();
+        if (now.difference(stat.modified) < const Duration(minutes: 10)) {
+          continue;
+        }
         await event.delete();
       } catch (error) {
         _logger.warning('Failed to delete cache file: $error');

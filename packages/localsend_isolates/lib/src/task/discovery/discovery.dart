@@ -56,6 +56,10 @@ class DiscoveryService {
     // Announcements are only answered while the server runs: the answer would
     // advertise an HTTP port that nobody listens on otherwise.
     _ref.stream(syncProvider).listen((event) {
+      if (event.prev.alias != event.next.alias) {
+        restartListener();
+        return;
+      }
       if (event.prev.serverRunning != event.next.serverRunning) {
         unawaited(_discovery?.setAnswerAnnouncements(answer: event.next.serverRunning));
       }

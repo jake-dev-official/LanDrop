@@ -35,6 +35,8 @@ pub(crate) struct UploadSessionV2 {
 
     /// The accepted files, mapped by file ID.
     pub(crate) files: HashMap<String, SessionFileV2>,
+
+    pub(crate) cancel: CancellationToken,
 }
 
 impl UploadSessionV2 {

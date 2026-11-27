@@ -109,8 +109,14 @@ pub(crate) async fn save_req_to_target(
     file_size: u64,
     expected_sha256: Option<&str>,
     timestamps: FileTimestamps,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> SaveResult {
     use sha2::{Digest, Sha256};
+
+    let cleanup_path = match &target {
+        FileUploadTarget::Path { path, .. } => Some(path.clone()),
+        _ => None,
+    };
 
     // Resolve the target into a chunk sender and a result receiver.
     // For [FileUploadTarget::Path] and [FileUploadTarget::Fd], the application's
@@ -165,7 +171,19 @@ pub(crate) async fn save_req_to_target(
     let mut hasher = expected_sha256.map(|_| Sha256::new());
     let mut body = req.into_body();
     let mut stream_error = false;
-    while let Some(frame) = body.frame().await {
+    let mut cancelled = false;
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                cancelled = true;
+                break;
+            }
+            frame = body.frame() => match frame {
+                Some(frame) => frame,
+                None => break,
+            }
+        };
         match frame {
             Ok(frame) => {
                 let Ok(data) = frame.into_data() else {
@@ -177,7 +195,15 @@ pub(crate) async fn save_req_to_target(
                 if let Some(hasher) = &mut hasher {
                     hasher.update(&data);
                 }
-                if binary_tx.send(data).await.is_err() {
+                let sent = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        cancelled = true;
+                        break;
+                    }
+                    res = binary_tx.send(data) => res,
+                };
+                if sent.is_err() {
                     // The receiver is gone (dropped by the application or
                     // closed by the file writer after an error).
                     stream_error = true;
@@ -197,6 +223,16 @@ pub(crate) async fn save_req_to_target(
 
     // Determine the outcome; `error` carries the reason for the application.
     let (result, error): (SaveResult, Option<String>) = 'outcome: {
+        if cancelled {
+            if app_result_tx.is_some() {
+                let _ = result_rx.await;
+            }
+            if let Some(path) = cleanup_path {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            break 'outcome (SaveResult::Failed, Some("Upload cancelled".to_string()));
+        }
+
         if stream_error {
             // The file writer (if any) fails with a size mismatch or its own
             // write error once the channel is closed; collect that reason.

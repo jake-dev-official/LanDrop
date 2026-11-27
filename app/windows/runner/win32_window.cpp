@@ -88,19 +88,32 @@ WindowClassRegistrar* WindowClassRegistrar::instance_ = nullptr;
 
 const wchar_t* WindowClassRegistrar::GetWindowClass() {
   if (!class_registered_) {
-    WNDCLASS window_class{};
+    HINSTANCE instance = GetModuleHandle(nullptr);
+    HICON big_icon = static_cast<HICON>(::LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        ::GetSystemMetrics(SM_CXICON), ::GetSystemMetrics(SM_CYICON),
+        LR_DEFAULTCOLOR));
+    HICON small_icon = static_cast<HICON>(::LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        ::GetSystemMetrics(SM_CXSMICON), ::GetSystemMetrics(SM_CYSMICON),
+        LR_DEFAULTCOLOR));
+
+    WNDCLASSEXW window_class{};
+    window_class.cbSize = sizeof(WNDCLASSEXW);
     window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
     window_class.lpszClassName = kWindowClassName;
     window_class.style = CS_HREDRAW | CS_VREDRAW;
     window_class.cbClsExtra = 0;
     window_class.cbWndExtra = 0;
-    window_class.hInstance = GetModuleHandle(nullptr);
+    window_class.hInstance = instance;
     window_class.hIcon =
-        LoadIcon(window_class.hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
+        big_icon ? big_icon : LoadIcon(instance, MAKEINTRESOURCE(IDI_APP_ICON));
+    window_class.hIconSm =
+        small_icon ? small_icon : window_class.hIcon;
     window_class.hbrBackground = 0;
     window_class.lpszMenuName = nullptr;
     window_class.lpfnWndProc = Win32Window::WndProc;
-    RegisterClass(&window_class);
+    RegisterClassExW(&window_class);
     class_registered_ = true;
   }
   return kWindowClassName;
@@ -142,6 +155,22 @@ bool Win32Window::Create(const std::wstring& title,
 
   if (!window) {
     return false;
+  }
+
+  HINSTANCE instance = GetModuleHandle(nullptr);
+  HICON big_icon = static_cast<HICON>(::LoadImageW(
+      instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+      ::GetSystemMetrics(SM_CXICON), ::GetSystemMetrics(SM_CYICON),
+      LR_DEFAULTCOLOR));
+  HICON small_icon = static_cast<HICON>(::LoadImageW(
+      instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+      ::GetSystemMetrics(SM_CXSMICON), ::GetSystemMetrics(SM_CYSMICON),
+      LR_DEFAULTCOLOR));
+  if (big_icon) {
+    ::SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon));
+  }
+  if (small_icon) {
+    ::SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
   }
 
   UpdateTheme(window);

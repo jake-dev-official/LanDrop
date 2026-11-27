@@ -66,6 +66,11 @@ class SettingsService extends PureNotifier<SettingsState> {
     receivePin: _persistence.getReceivePin(),
     autoFinish: _persistence.isAutoFinish(),
     minimizeToTray: _persistence.isMinimizeToTray(),
+    silentCompletion: _persistence.isSilentCompletion(),
+    playCompletionSound: _persistence.isPlayCompletionSound(),
+    soundPreset: _persistence.getSoundPreset(),
+    customSoundPath: _persistence.getCustomSoundPath(),
+    backgroundKeepAlive: _persistence.isBackgroundKeepAlive(),
     https: _persistence.isHttps(),
     sendMode: _persistence.getSendMode(),
     saveWindowPlacement: _persistence.getSaveWindowPlacement(),
@@ -227,6 +232,41 @@ class SettingsService extends PureNotifier<SettingsState> {
     await _persistence.setMinimizeToTray(minimizeToTray);
     state = state.copyWith(
       minimizeToTray: minimizeToTray,
+    );
+  }
+
+  Future<void> setSilentCompletion(bool silentCompletion) async {
+    await _persistence.setSilentCompletion(silentCompletion);
+    state = state.copyWith(
+      silentCompletion: silentCompletion,
+    );
+  }
+
+  Future<void> setPlayCompletionSound(bool playCompletionSound) async {
+    await _persistence.setPlayCompletionSound(playCompletionSound);
+    state = state.copyWith(
+      playCompletionSound: playCompletionSound,
+    );
+  }
+
+  Future<void> setSoundPreset(String soundPreset) async {
+    await _persistence.setSoundPreset(soundPreset);
+    state = state.copyWith(
+      soundPreset: soundPreset,
+    );
+  }
+
+  Future<void> setCustomSoundPath(String? customSoundPath) async {
+    await _persistence.setCustomSoundPath(customSoundPath);
+    state = state.copyWith(
+      customSoundPath: customSoundPath,
+    );
+  }
+
+  Future<void> setBackgroundKeepAlive(bool backgroundKeepAlive) async {
+    await _persistence.setBackgroundKeepAlive(backgroundKeepAlive);
+    state = state.copyWith(
+      backgroundKeepAlive: backgroundKeepAlive,
     );
   }
 

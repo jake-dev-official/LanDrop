@@ -14,6 +14,29 @@ class TransferNotification {
 
   static final _transfers = <String, _Transfer>{};
   static NotificationStrings? _strings;
+  static bool _keepAlive = false;
+
+  /// Enables or disables persistent idle foreground notification on Android.
+  static void setKeepAlive({
+    required bool enabled,
+    required String channelName,
+    required String idleTitle,
+    required String idleText,
+  }) {
+    _keepAlive = enabled;
+    if (_transfers.isNotEmpty) {
+      return;
+    }
+    if (enabled) {
+      ForegroundService.start(
+        channelName: channelName,
+        title: idleTitle,
+        text: idleText,
+      );
+    } else {
+      ForegroundService.stop();
+    }
+  }
 
   /// Injects the translated strings. Must be called before the first transfer starts.
   /// The locale is pinned on app start, so one call is enough.
@@ -41,12 +64,19 @@ class TransferNotification {
     final isFirst = _transfers.isEmpty;
     _transfers[sessionId] = _Transfer(receiving: receiving);
 
+    if (_keepAlive && ForegroundService.isRunning) {
+      // Android live progress + Cancel notification updates ID 1 directly without overwriting it.
+      return;
+    }
+
     if (isFirst) {
       ForegroundService.start(
         channelName: _requiredStrings.titleReceiving,
         title: _title(),
         text: _text(),
       );
+    } else {
+      ForegroundService.updateNotification(title: _title(), text: _text(), force: true);
     }
   }
 
@@ -68,6 +98,10 @@ class TransferNotification {
     transfer.totalBytes = totalBytes;
     transfer.speedInBytes = measureSpeed(startTime: startTime, endTime: endTime, bytes: currentBytes);
 
+    if (_keepAlive) {
+      return;
+    }
+
     ForegroundService.updateNotification(title: _title(), text: _text());
   }
 
@@ -78,8 +112,12 @@ class TransferNotification {
     }
 
     if (_transfers.isEmpty) {
-      ForegroundService.stop();
-    } else {
+      if (_keepAlive) {
+        return;
+      } else {
+        ForegroundService.stop();
+      }
+    } else if (!_keepAlive) {
       ForegroundService.updateNotification(title: _title(), text: _text());
     }
   }

@@ -2,18 +2,20 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:collection/collection.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/persistence/color_mode.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
+import 'package:localsend_app/model/persistence/known_device.dart';
 import 'package:localsend_app/model/persistence/quick_save_mode.dart';
 import 'package:localsend_app/model/persistence/receive_history_entry.dart';
 import 'package:localsend_app/model/send_mode.dart';
 import 'package:localsend_app/provider/window_dimensions_provider.dart';
-import 'package:localsend_app/util/alias_generator.dart';
 import 'package:localsend_app/util/native/autostart_helper.dart';
 import 'package:localsend_app/util/native/context_menu_helper.dart';
+import 'package:localsend_app/util/native/device_info_helper.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:localsend_app/util/security_helper.dart';
 import 'package:localsend_app/util/shared_preferences/shared_preferences_file.dart';
@@ -33,8 +35,47 @@ part 'persistence_provider_migrations.dart';
 final _logger = Logger('PersistenceService');
 
 String get _windowsFile {
+  final userProfile = Platform.environment['USERPROFILE'] ?? '';
+  if (userProfile.isNotEmpty) {
+    return '$userProfile\\.landrop\\settings.json';
+  }
   final appData = Platform.environment['APPDATA'];
-  return '$appData\\LocalSend\\settings.json';
+  return '$appData\\LanDrop\\settings.json';
+}
+
+bool _isLegacyGeneratedAlias(String alias) {
+  final parts = alias.trim().split(RegExp(r'\s+'));
+  if (parts.length != 2) {
+    return false;
+  }
+  final adjectives = t.aliasGenerator.adjectives.map((e) => e.toLowerCase()).toSet();
+  final fruits = t.aliasGenerator.fruits.map((e) => e.toLowerCase()).toSet();
+  return adjectives.contains(parts[0].toLowerCase()) && fruits.contains(parts[1].toLowerCase());
+}
+
+void _migrateWindowsSettingsIfNeeded(String targetPath) {
+  final targetFile = File(targetPath);
+  if (targetFile.existsSync()) {
+    return;
+  }
+  final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
+  final appData = Platform.environment['APPDATA'] ?? '';
+  final candidates = [
+    if (localAppData.isNotEmpty) '$localAppData\\Packages\\LanDrop.App_2dmbyj30dbpyt\\LocalCache\\Roaming\\LanDrop\\settings.json',
+    if (appData.isNotEmpty) '$appData\\LanDrop\\settings.json',
+  ];
+  for (final candidate in candidates) {
+    final src = File(candidate);
+    if (src.existsSync()) {
+      try {
+        targetFile.parent.createSync(recursive: true);
+        src.copySync(targetPath);
+        return;
+      } catch (e) {
+        _logger.warning('Failed to migrate settings from $candidate: $e');
+      }
+    }
+  }
 }
 
 String get _windowsLegacyFile {
@@ -57,6 +98,7 @@ const _receiveHistory = 'ls_receive_history';
 
 // Favorites
 const _favorites = 'ls_favorites';
+const _knownDevices = 'ls_known_devices';
 
 // App Window Offset and Size info
 const _windowOffsetX = 'ls_window_offset_x';
@@ -85,6 +127,12 @@ const _quickSave = 'ls_quick_save'; // a QuickSaveMode; was a bool until storage
 const _receivePin = 'ls_receive_pin';
 const _autoFinish = 'ls_auto_finish';
 const _minimizeToTray = 'ls_minimize_to_tray';
+const _silentCompletion = 'ls_silent_completion';
+const _playCompletionSound = 'ls_play_completion_sound';
+const _soundPreset = 'ls_sound_preset';
+const _customSoundPath = 'ls_custom_sound_path';
+const _backgroundKeepAlive = 'ls_background_keep_alive';
+const _autoStartInitialized = 'ls_autostart_initialized';
 const _https = 'ls_https';
 const _sendMode = 'ls_send_mode';
 const _enableAnimations = 'ls_enable_animations';
@@ -114,32 +162,26 @@ class PersistenceService {
     SharedPreferences prefs;
 
     final portableStore = SharedPreferencesPortable();
-    bool usingLegacyStore = false;
     if (checkPlatform(const [TargetPlatform.windows, TargetPlatform.linux, TargetPlatform.macOS]) && portableStore.exists()) {
       _logger.info('Using portable settings.');
       SharedPreferencesStorePlatform.instance = portableStore;
     } else if (defaultTargetPlatform == TargetPlatform.windows) {
-      final legacyStore = SharedPreferencesFile(filePath: _windowsLegacyFile);
-      if (legacyStore.exists()) {
-        _logger.info('Using legacy settings. Will migrate in the next step.');
-        SharedPreferencesStorePlatform.instance = legacyStore;
-        usingLegacyStore = true;
-      } else {
-        SharedPreferencesStorePlatform.instance = SharedPreferencesFile(filePath: _windowsFile);
-      }
+      final path = _windowsFile;
+      _migrateWindowsSettingsIfNeeded(path);
+      SharedPreferencesStorePlatform.instance = SharedPreferencesFile(filePath: path);
     }
 
     final bool isFirstAppStart;
     final existingPrefs = await SharedPreferencesStorePlatform.instance.getAll();
     final existingVersion = existingPrefs['flutter.$_version'] as int?;
     _logger.info('Existing version: $existingVersion');
-    isFirstAppStart = existingVersion == null && !usingLegacyStore && !existingPrefs.keys.any((key) => key.startsWith('flutter.ls_'));
+    isFirstAppStart = existingVersion == null && !existingPrefs.keys.any((key) => key.startsWith('flutter.ls_'));
     if (isFirstAppStart) {
       await SharedPreferencesStorePlatform.instance.setValue('Int', 'flutter.$_version', _latestVersion);
     } else {
       // Unversioned profiles in the current store may already contain string modes.
       // Only apply the repair migration; older migrations would replace those modes.
-      final fromVersion = existingVersion ?? (usingLegacyStore ? 1 : 3);
+      final fromVersion = existingVersion ?? 3;
       if (fromVersion < _latestVersion) {
         await _runMigrations(fromVersion);
       }
@@ -169,8 +211,23 @@ class PersistenceService {
       await prefs.setString(_showToken, const Uuid().v4());
     }
 
-    if (prefs.getString(_aliasKey) == null) {
-      await prefs.setString(_aliasKey, generateRandomAlias());
+    final currentAlias = prefs.getString(_aliasKey);
+    bool shouldReplaceAlias = currentAlias == null || currentAlias.trim().isEmpty || _isLegacyGeneratedAlias(currentAlias);
+    if (!shouldReplaceAlias && defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        final model = (await DeviceInfoPlugin().androidInfo).model.trim();
+        if (model.isNotEmpty && currentAlias.trim().toLowerCase() == model.toLowerCase()) {
+          shouldReplaceAlias = true;
+        }
+      } catch (_) {}
+    }
+    if (shouldReplaceAlias) {
+      final systemName = (await getDeviceName())?.trim();
+      if (systemName != null && systemName.isNotEmpty) {
+        await prefs.setString(_aliasKey, systemName);
+      } else if (currentAlias == null || currentAlias.trim().isEmpty) {
+        await prefs.setString(_aliasKey, 'LanDrop Device');
+      }
     }
 
     if (prefs.getString(_securityContext) == null) {
@@ -212,7 +269,7 @@ class PersistenceService {
   static Future<void> _initColorSetting(SharedPreferences prefs, bool supportsDynamicColors) async {
     await prefs.setString(
       _colorKey,
-      checkPlatform([TargetPlatform.android]) && supportsDynamicColors ? ColorMode.system.name : ColorMode.localsend.name,
+      ColorMode.localsend.name,
     );
   }
 
@@ -275,12 +332,33 @@ class PersistenceService {
     await _prefs.setStringList(_favorites, favoritesRaw);
   }
 
+  List<KnownDevice> getKnownDevices() {
+    final raw = _prefs.getStringList(_knownDevices) ?? [];
+    final parsed = <KnownDevice>[];
+    for (final entry in raw) {
+      try {
+        final dev = KnownDevice.fromJson(jsonDecode(entry) as Map<String, dynamic>);
+        if (dev.fingerprint.isNotEmpty && dev.ip.isNotEmpty && !_isLegacyGeneratedAlias(dev.alias)) {
+          parsed.add(dev);
+        }
+      } catch (_) {
+        // Ignore malformed entries.
+      }
+    }
+    return parsed;
+  }
+
+  Future<void> setKnownDevices(List<KnownDevice> entries) async {
+    final raw = entries.map((entry) => jsonEncode(entry.toJson())).toList();
+    await _prefs.setStringList(_knownDevices, raw);
+  }
+
   String getShowToken() {
     return _prefs.getString(_showToken)!;
   }
 
   String getAlias() {
-    return _prefs.getString(_aliasKey) ?? generateRandomAlias();
+    return _prefs.getString(_aliasKey) ?? 'LanDrop Device';
   }
 
   Future<void> setAlias(String alias) async {
@@ -290,9 +368,9 @@ class PersistenceService {
   ThemeMode getTheme() {
     final value = _prefs.getString(_themeKey);
     if (value == null) {
-      return ThemeMode.system;
+      return ThemeMode.dark;
     }
-    return ThemeMode.values.firstWhereOrNull((theme) => theme.name == value) ?? ThemeMode.system;
+    return ThemeMode.values.firstWhereOrNull((theme) => theme.name == value) ?? ThemeMode.dark;
   }
 
   Future<void> setTheme(ThemeMode theme) async {
@@ -315,7 +393,7 @@ class PersistenceService {
     final value = _prefs.getString(_customColorKey);
     final rgb = value == null ? null : int.tryParse(value, radix: 16);
     if (rgb == null) {
-      return Colors.teal;
+      return const Color(0xFF2563EB);
     }
     return Color(0xff000000 | rgb);
   }
@@ -478,7 +556,7 @@ class PersistenceService {
   }
 
   bool isAutoFinish() {
-    return _prefs.getBool(_autoFinish) ?? false;
+    return true;
   }
 
   Future<void> setAutoFinish(bool autoFinish) async {
@@ -486,11 +564,63 @@ class PersistenceService {
   }
 
   bool isMinimizeToTray() {
-    return _prefs.getBool(_minimizeToTray) ?? false;
+    return true;
   }
 
   Future<void> setMinimizeToTray(bool minimizeToTray) async {
     await _prefs.setBool(_minimizeToTray, minimizeToTray);
+  }
+
+  bool isSilentCompletion() {
+    return _prefs.getBool(_silentCompletion) ?? true;
+  }
+
+  Future<void> setSilentCompletion(bool silentCompletion) async {
+    await _prefs.setBool(_silentCompletion, silentCompletion);
+  }
+
+  bool isPlayCompletionSound() {
+    return _prefs.getBool(_playCompletionSound) ?? true;
+  }
+
+  Future<void> setPlayCompletionSound(bool playCompletionSound) async {
+    await _prefs.setBool(_playCompletionSound, playCompletionSound);
+  }
+
+  String getSoundPreset() {
+    return _prefs.getString(_soundPreset) ?? 'default';
+  }
+
+  Future<void> setSoundPreset(String preset) async {
+    await _prefs.setString(_soundPreset, preset);
+  }
+
+  String? getCustomSoundPath() {
+    return _prefs.getString(_customSoundPath);
+  }
+
+  Future<void> setCustomSoundPath(String? path) async {
+    if (path == null || path.isEmpty) {
+      await _prefs.remove(_customSoundPath);
+    } else {
+      await _prefs.setString(_customSoundPath, path);
+    }
+  }
+
+  bool isBackgroundKeepAlive() {
+    return _prefs.getBool(_backgroundKeepAlive) ?? true;
+  }
+
+  Future<void> setBackgroundKeepAlive(bool backgroundKeepAlive) async {
+    await _prefs.setBool(_backgroundKeepAlive, backgroundKeepAlive);
+  }
+
+  bool isAutoStartInitialized() {
+    return _prefs.getBool(_autoStartInitialized) ?? false;
+  }
+
+  Future<void> setAutoStartInitialized(bool initialized) async {
+    await _prefs.setBool(_autoStartInitialized, initialized);
   }
 
   bool isHttps() {

@@ -1,13 +1,15 @@
 import 'dart:async';
 
+import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
+import 'package:localsend_app/provider/known_devices_provider.dart';
 import 'package:localsend_app/provider/local_ip_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 
 /// Discovers devices in stages, cheapest first: multicast announcement and
-/// favorite probes right away, http-based discovery on the subnets only when
+/// favorite/known-device probes right away, http-based discovery on the subnets only when
 /// nothing was confirmed within 1 second.
 class StartSmartScan extends AsyncGlobalAction {
   /// Maximum number of interfaces to scan.
@@ -17,14 +19,33 @@ class StartSmartScan extends AsyncGlobalAction {
   @override
   Future<void> reduce() async {
     final favorites = ref.read(favoritesProvider);
+    final known = ref.read(knownDevicesProvider);
     final settings = ref.read(settingsProvider);
     final networkInterfaces = ref.read(localIpProvider).localIps.take(maxInterfaces).toList();
+    if (networkInterfaces.isEmpty) {
+      return;
+    }
+
+    final probeByFingerprint = <String, FavoriteDevice>{
+      for (final f in favorites) f.fingerprint: f,
+    };
+    for (final k in known) {
+      probeByFingerprint.putIfAbsent(
+        k.fingerprint,
+        () => FavoriteDevice.fromValues(
+          fingerprint: k.fingerprint,
+          ip: k.ip,
+          port: k.port,
+          alias: k.alias,
+        ),
+      );
+    }
 
     await ref
         .redux(nearbyDevicesProvider)
         .dispatchAsync(
           StartStagedScan(
-            favorites: favorites,
+            favorites: probeByFingerprint.values.toList(),
             interfaces: networkInterfaces,
             port: settings.port,
             https: settings.https,

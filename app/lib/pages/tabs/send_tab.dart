@@ -418,9 +418,6 @@ class _SendModeButton extends StatelessWidget {
           case 1:
             onSelect(SendMode.multiple);
             break;
-          case 2:
-            onSelect(SendMode.link);
-            break;
           case -1:
             await showDialog(context: context, builder: (_) => const SendModeHelpDialog());
             break;
@@ -468,23 +465,6 @@ class _SendModeButton extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               Text(t.sendTab.sendModes.multiple),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 2,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Visibility(
-                visible: false,
-                maintainSize: true,
-                maintainAnimation: true,
-                maintainState: true,
-                child: Icon(Icons.check_circle),
-              ),
-              const SizedBox(width: 10),
-              Text(t.sendTab.sendModes.link),
             ],
           ),
         ),

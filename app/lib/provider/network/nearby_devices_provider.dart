@@ -4,7 +4,10 @@ import 'package:collection/collection.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/state/nearby_devices_state.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
+import 'package:localsend_app/provider/known_devices_provider.dart';
 import 'package:localsend_app/provider/logging/discovery_logs_provider.dart';
+import 'package:localsend_app/provider/network/pending_send_provider.dart';
+import 'package:localsend_app/util/native/windows_device_cache.dart';
 import 'package:localsend_isolates/isolate.dart';
 import 'package:localsend_isolates/model/device.dart';
 import 'package:localsend_isolates/model/discovery_event.dart';
@@ -15,26 +18,45 @@ import 'package:refena_flutter/refena_flutter.dart';
 /// - Keeping track of all found devices (they are only stored in RAM)
 ///
 /// Use [scanProvider] to have a high-level API to perform discovery operations.
-final nearbyDevicesProvider = ReduxProvider<NearbyDevicesService, NearbyDevicesState>((ref) {
-  return NearbyDevicesService(
-    isolateController: ref.notifier(parentIsolateProvider),
-    favoriteService: ref.notifier(favoritesProvider),
-    discoveryLogs: ref.notifier(discoveryLoggerProvider),
-  );
-});
+final ReduxProvider<NearbyDevicesService, NearbyDevicesState> nearbyDevicesProvider = ReduxProvider<NearbyDevicesService, NearbyDevicesState>(
+  (ref) {
+    return NearbyDevicesService(
+      isolateController: ref.notifier(parentIsolateProvider),
+      favoriteService: ref.notifier(favoritesProvider),
+      knownDevicesService: ref.notifier(knownDevicesProvider),
+      discoveryLogs: ref.notifier(discoveryLoggerProvider),
+      onDeviceRegistered: (device) => ref.notifier(pendingSendProvider).onDeviceOnline(device),
+    );
+  },
+  onChanged: (_, next, ref) {
+    unawaited(
+      syncWindowsDeviceCache(
+        favorites: ref.read(favoritesProvider),
+        nearbyDevices: next.devices,
+        knownDevices: ref.read(knownDevicesProvider),
+      ),
+    );
+  },
+);
 
 class NearbyDevicesService extends ReduxNotifier<NearbyDevicesState> {
   final IsolateController _isolateController;
   final FavoritesService _favoriteService;
+  final KnownDevicesService _knownDevicesService;
   final DiscoveryLogger _discoveryLogger;
+  final void Function(Device device) _onDeviceRegistered;
 
   NearbyDevicesService({
     required IsolateController isolateController,
     required FavoritesService favoriteService,
+    required KnownDevicesService knownDevicesService,
     required DiscoveryLogger discoveryLogs,
+    required void Function(Device device) onDeviceRegistered,
   }) : _discoveryLogger = discoveryLogs,
        _isolateController = isolateController,
-       _favoriteService = favoriteService;
+       _favoriteService = favoriteService,
+       _knownDevicesService = knownDevicesService,
+       _onDeviceRegistered = onDeviceRegistered;
 
   @override
   NearbyDevicesState init() => const NearbyDevicesState(
@@ -81,6 +103,23 @@ class ClearFoundDevicesAction extends ReduxAction<NearbyDevicesService, NearbyDe
   }
 }
 
+/// Removes a single device (e.g. unreachable on direct dial) from online state.
+class RemoveFoundDeviceAction extends ReduxAction<NearbyDevicesService, NearbyDevicesState> {
+  final String fingerprint;
+
+  RemoveFoundDeviceAction(this.fingerprint);
+
+  @override
+  NearbyDevicesState reduce() {
+    if (!state.devices.containsKey(fingerprint)) {
+      return state;
+    }
+    return state.copyWith(
+      devices: {...state.devices}..remove(fingerprint),
+    );
+  }
+}
+
 /// Registers a device in the state.
 /// It will override any existing device with the same fingerprint: the
 /// incoming device is the merged store state, so it already carries every
@@ -98,12 +137,23 @@ class RegisterDeviceAction extends AsyncReduxAction<NearbyDevicesService, Nearby
     assert(device.ip?.isNotEmpty ?? false, 'IP must not be empty');
 
     final favoriteDevice = notifier._favoriteService.state.firstWhereOrNull((e) => e.fingerprint == device.fingerprint);
-    if (favoriteDevice != null && !favoriteDevice.customAlias) {
-      // Update existing favorite with new alias
-      await external(notifier._favoriteService).dispatchAsync(UpdateFavoriteAction(favoriteDevice.copyWith(alias: device.alias)));
-    } else {
-      await Future.microtask(() {});
+    if (favoriteDevice != null) {
+      final newAlias = favoriteDevice.customAlias ? favoriteDevice.alias : device.alias;
+      final newIp = device.ip ?? favoriteDevice.ip;
+      if (newAlias != favoriteDevice.alias || newIp != favoriteDevice.ip || device.port != favoriteDevice.port) {
+        await external(notifier._favoriteService).dispatchAsync(
+          UpdateFavoriteAction(
+            favoriteDevice.copyWith(
+              alias: newAlias,
+              ip: newIp,
+              port: device.port,
+            ),
+          ),
+        );
+      }
     }
+    await external(notifier._knownDevicesService).dispatchAsync(RememberDeviceAction(device));
+    unawaited(Future.microtask(() => notifier._onDeviceRegistered(device)));
     return state.copyWith(
       devices: {...state.devices}..update(device.fingerprint, (_) => device, ifAbsent: () => device),
     );

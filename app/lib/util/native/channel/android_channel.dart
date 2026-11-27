@@ -49,6 +49,16 @@ Future<String?> getDownloadsDirectoryAndroid() async {
   }
 }
 
+/// Returns the user-configured Android device name (Settings.Global.DEVICE_NAME / bluetooth_name).
+Future<String?> getDeviceNameAndroid() async {
+  try {
+    return await _methodChannel.invokeMethod<String>('getDeviceName');
+  } catch (e) {
+    _logger.warning('Could not get Android device name', e);
+    return null;
+  }
+}
+
 Future<bool> getSystemAnimationsStatusAndroid() async {
   return await _methodChannel.invokeMethod('isAnimationsEnabled') ?? true;
 }
@@ -86,6 +96,84 @@ Future<void> flushPendingShareIntentsAndroid() async {
 Future<void> openGallery() async {
   _logger.info('Opening gallery');
   await _methodChannel.invokeMethod('openGallery');
+}
+
+Future<void> playCompletionSoundAndroid(String path) async {
+  await _methodChannel.invokeMethod('playCompletionSound', {
+    'path': path,
+  });
+}
+
+Future<void> showIncomingRequestNotificationAndroid({
+  required String senderAlias,
+  required int fileCount,
+}) async {
+  try {
+    await _methodChannel.invokeMethod('showIncomingRequestNotification', {
+      'senderAlias': senderAlias,
+      'fileCount': fileCount,
+    });
+  } catch (e) {
+    _logger.warning('Could not show incoming request notification', e);
+  }
+}
+
+Future<void> cancelIncomingRequestNotificationAndroid() async {
+  try {
+    await _methodChannel.invokeMethod('cancelIncomingRequestNotification');
+  } catch (e) {
+    _logger.warning('Could not cancel incoming request notification', e);
+  }
+}
+
+Future<void> showTransferProgressNotificationAndroid({
+  required String title,
+  required String body,
+  required int progress,
+  int max = 100,
+  bool indeterminate = false,
+}) async {
+  try {
+    await _methodChannel.invokeMethod('showTransferProgressNotification', {
+      'title': title,
+      'body': body,
+      'progress': progress,
+      'max': max,
+      'indeterminate': indeterminate,
+    });
+  } catch (e) {
+    _logger.warning('Could not show transfer progress notification', e);
+  }
+}
+
+Future<void> showTransferCompletedNotificationAndroid({
+  required String title,
+  required String body,
+}) async {
+  try {
+    await _methodChannel.invokeMethod('showTransferCompletedNotification', {
+      'title': title,
+      'body': body,
+    });
+  } catch (e) {
+    _logger.warning('Could not show transfer completed notification', e);
+  }
+}
+
+Future<void> cancelTransferProgressNotificationAndroid() async {
+  try {
+    await _methodChannel.invokeMethod('cancelTransferProgressNotification');
+  } catch (e) {
+    _logger.warning('Could not cancel transfer progress notification', e);
+  }
+}
+
+void registerAndroidCancelTransferHandler(void Function() onCancel) {
+  _methodChannel.setMethodCallHandler((call) async {
+    if (call.method == 'cancelActiveTransfer') {
+      onCancel();
+    }
+  });
 }
 
 @MappableClass()

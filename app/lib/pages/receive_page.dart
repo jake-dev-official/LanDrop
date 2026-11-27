@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/persistence/color_mode.dart';
+import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/pages/receive_options_page.dart';
 import 'package:localsend_app/pages/verify_page.dart';
 import 'package:localsend_app/pages/web_share_page.dart';
@@ -142,6 +143,30 @@ class _ReceivePageState extends State<ReceivePage> with Refena {
                                             foregroundColor: Theme.of(context).colorScheme.onInverseSurface,
                                             label: vm.sender.deviceModel!,
                                           ),
+                                        ),
+                                      ],
+                                      if (vm.showSenderInfo && senderFavoriteEntry == null && vm.sender.ip != null && vm.sender.ip!.isNotEmpty) ...[
+                                        const SizedBox(height: 10),
+                                        OutlinedButton.icon(
+                                          onPressed: () {
+                                            unawaited(
+                                              ref
+                                                  .redux(favoritesProvider)
+                                                  .dispatchAsync(
+                                                    AddFavoriteAction(
+                                                      FavoriteDevice.fromValues(
+                                                        fingerprint: vm.sender.fingerprint,
+                                                        ip: vm.sender.ip!,
+                                                        port: vm.sender.port,
+                                                        alias: vm.sender.alias,
+                                                      ),
+                                                    ),
+                                                  ),
+                                            );
+                                            context.showSnackBar('Added ${vm.sender.alias} to favorites');
+                                          },
+                                          icon: const Icon(Icons.star_border, size: 18),
+                                          label: Text('Favorite ${vm.sender.alias}'),
                                         ),
                                       ],
                                     ],

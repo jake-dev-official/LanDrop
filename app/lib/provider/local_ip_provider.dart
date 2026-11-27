@@ -4,6 +4,8 @@ import 'package:collection/collection.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:localsend_app/model/state/network_state.dart';
+import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
+import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:localsend_isolates/util/network_interfaces.dart';
@@ -13,11 +15,21 @@ import 'package:refena_flutter/refena_flutter.dart';
 
 final _logger = Logger('NetworkInfo');
 
-final localIpProvider = ReduxProvider<LocalIpService, NetworkState>((ref) {
-  return LocalIpService(
-    ref.notifier(settingsProvider),
-  );
-});
+final ReduxProvider<LocalIpService, NetworkState> localIpProvider = ReduxProvider<LocalIpService, NetworkState>(
+  (ref) {
+    return LocalIpService(
+      ref.notifier(settingsProvider),
+    );
+  },
+  onChanged: (prev, next, ref) {
+    if (prev.initialized && !const ListEquality<String>().equals(prev.localIps, next.localIps)) {
+      ref.redux(nearbyDevicesProvider).dispatch(ClearFoundDevicesAction());
+      if (next.localIps.isNotEmpty) {
+        unawaited(ref.global.dispatchAsync(StartSmartScan()));
+      }
+    }
+  },
+);
 
 StreamSubscription? _subscription;
 
@@ -83,12 +95,14 @@ Future<List<String>> _getIp({
   required List<String>? whitelist,
   required List<String>? blacklist,
 }) async {
-  final info = plugin.NetworkInfo();
   String? ip;
-  try {
-    ip = await info.getWifiIP();
-  } catch (e) {
-    _logger.warning('Failed to get wifi IP', e);
+  if (!checkPlatform([TargetPlatform.windows])) {
+    final info = plugin.NetworkInfo();
+    try {
+      ip = await info.getWifiIP();
+    } catch (e) {
+      _logger.warning('Failed to get wifi IP', e);
+    }
   }
 
   final nativeResult =

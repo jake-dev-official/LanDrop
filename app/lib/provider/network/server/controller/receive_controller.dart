@@ -22,7 +22,10 @@ import 'package:localsend_app/provider/security_provider.dart';
 import 'package:localsend_app/provider/selection/selected_receiving_files_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
+import 'package:localsend_app/util/native/channel/android_channel.dart';
+import 'package:localsend_app/util/native/completion_sound_helper.dart';
 import 'package:localsend_app/util/native/directories.dart';
+import 'package:localsend_app/util/native/headless_send_helper.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:localsend_app/util/native/tray_helper.dart';
 import 'package:localsend_app/widget/dialogs/open_file_dialog.dart';
@@ -32,6 +35,8 @@ import 'package:localsend_isolates/model/file_status.dart';
 import 'package:localsend_isolates/model/file_type.dart';
 import 'package:localsend_isolates/model/session_status.dart';
 import 'package:localsend_isolates/rust/api/server.dart' show SessionEndReasonV2;
+import 'package:localsend_isolates/util/file_size_helper.dart';
+import 'package:localsend_isolates/util/file_speed_helper.dart';
 import 'package:localsend_isolates/util/rust.dart';
 import 'package:localsend_isolates/util/transfer_notification.dart';
 import 'package:logging/logging.dart';
@@ -48,6 +53,7 @@ final _logger = Logger('ReceiveController');
 /// the events handled here.
 class ReceiveController {
   final ServerUtils server;
+  DateTime? _lastAndroidProgressNotif;
 
   ReceiveController(this.server);
 
@@ -141,15 +147,21 @@ class ReceiveController {
     }
 
     if (quickSave) {
-      // Push before accepting: the permission request in [acceptFileRequest] may block for a while.
-      // ignore: use_build_context_synchronously, unawaited_futures
-      Routerino.context.pushImmediately(
-        () => ProgressPage(
-          showAppBar: false,
-          closeSessionOnClose: true,
-          sessionId: sessionId,
-        ),
-      );
+      if (!settings.silentCompletion) {
+        if (checkPlatformHasTray() &&
+            (await windowManager.isMinimized() || !(await windowManager.isVisible()) || !(await windowManager.isFocused()))) {
+          await showFromTray();
+        }
+        // Push before accepting: the permission request in [acceptFileRequest] may block for a while.
+        // ignore: use_build_context_synchronously, unawaited_futures
+        Routerino.context.pushImmediately(
+          () => ProgressPage(
+            showAppBar: false,
+            closeSessionOnClose: true,
+            sessionId: sessionId,
+          ),
+        );
+      }
 
       // accept all files
       await acceptFileRequest({
@@ -232,8 +244,19 @@ class ReceiveController {
 
     server.ref.notifier(selectedReceivingFilesProvider).setFiles(files.values.toList());
 
-    // ignore: use_build_context_synchronously, unawaited_futures
-    Routerino.context.push(() => ReceivePage(receiveProvider));
+    if (checkPlatform([TargetPlatform.android])) {
+      unawaited(
+        showIncomingRequestNotificationAndroid(
+          senderAlias: server.getState().session?.senderAlias ?? event.info.alias,
+          fileCount: files.length,
+        ),
+      );
+    }
+
+    if (Routerino.navigatorKey.currentContext != null) {
+      // ignore: use_build_context_synchronously, unawaited_futures
+      Routerino.context.push(() => ReceivePage(receiveProvider));
+    }
   }
 
   /// An accepted file started being uploaded.
@@ -275,7 +298,7 @@ class ReceiveController {
   /// The receive progress of a file reported by the server isolate.
   void onFileUploadProgress(HttpServerFileUploadProgressEvent event) {
     final receiveState = server.getStateOrNull()?.session;
-    if (receiveState == null || receiveState.sessionId != event.sessionId) {
+    if (receiveState == null || receiveState.sessionId != event.sessionId || receiveState.status != SessionStatus.sending) {
       return;
     }
 
@@ -293,7 +316,12 @@ class ReceiveController {
   /// Reports the total session progress to the foreground service notification,
   /// so that it stays up to date while the app is minimized.
   void _updateForegroundServiceProgress(ReceiveSessionState session) {
-    if (!TransferNotification.shouldUpdate) {
+    final now = DateTime.now();
+    final shouldUpdateNotif = TransferNotification.shouldUpdate;
+    final shouldUpdateAndroidBar =
+        checkPlatform([TargetPlatform.android]) &&
+        (_lastAndroidProgressNotif == null || now.difference(_lastAndroidProgressNotif!).inMilliseconds >= 300);
+    if (!shouldUpdateNotif && !shouldUpdateAndroidBar) {
       // Checked before the sum below because progress events arrive several times per second per file.
       return;
     }
@@ -311,13 +339,31 @@ class ReceiveController {
       currentBytes += (transferNotifier.getProgress(sessionId: session.sessionId, fileId: receivingFile.file.id) * size).round();
     }
 
-    TransferNotification.update(
-      sessionId: session.sessionId,
-      currentBytes: currentBytes,
-      totalBytes: totalBytes,
-      startTime: session.startTime,
-      endTime: session.endTime,
-    );
+    if (shouldUpdateNotif && !checkPlatform([TargetPlatform.android])) {
+      TransferNotification.update(
+        sessionId: session.sessionId,
+        currentBytes: currentBytes,
+        totalBytes: totalBytes,
+        startTime: session.startTime,
+        endTime: session.endTime,
+      );
+    }
+
+    if (shouldUpdateAndroidBar) {
+      _lastAndroidProgressNotif = now;
+      final percent = totalBytes == 0 ? 0 : ((100 * currentBytes) ~/ totalBytes).clamp(0, 100);
+      final speed = measureSpeed(startTime: session.startTime, endTime: session.endTime, bytes: currentBytes);
+      final speedPart = (speed != null && speed > 0) ? ' · ${speed.asReadableFileSize}/s' : '';
+      unawaited(
+        showTransferProgressNotificationAndroid(
+          title: 'Receiving from ${session.senderAlias} · $percent%',
+          body: '${currentBytes.asReadableFileSize} / ${totalBytes.asReadableFileSize}$speedPart',
+          progress: percent,
+          max: 100,
+          indeterminate: totalBytes == 0,
+        ),
+      );
+    }
   }
 
   /// A file has been received completely (or failed) by the server isolate.
@@ -391,14 +437,17 @@ class ReceiveController {
         );
 
     final session = server.getStateOrNull()?.session;
-    if (session == null) {
+    if (session == null || session.sessionId != event.sessionId || !allowedStates.contains(session.status)) {
       return;
     }
 
-    _updateForegroundServiceProgress(session);
-
     final statuses = server.ref.read(fileTransferProvider).getStatuses(session.sessionId);
-    if (allowedStates.contains(session.status) && statuses.isFinishedOrError) {
+    final allFinishedOrError = allowedStates.contains(session.status) && statuses.isFinishedOrError;
+    if (!allFinishedOrError) {
+      _updateForegroundServiceProgress(session);
+      return;
+    }
+    if (allFinishedOrError) {
       // The transfer is over, the process no longer needs to be kept alive for it.
       TransferNotification.stop(session.sessionId);
 
@@ -412,6 +461,26 @@ class ReceiveController {
         ),
       );
       final settings = server.ref.read(settingsProvider);
+      if (!hasError && settings.playCompletionSound) {
+        unawaited(
+          playTransferFinishSound(
+            preset: settings.soundPreset,
+            customPath: settings.customSoundPath,
+          ),
+        );
+      }
+      if (checkPlatform([TargetPlatform.android])) {
+        _lastAndroidProgressNotif = null;
+        final acceptedFiles = session.files.values.where((f) => f.desiredName != null).toList();
+        final totalBytes = acceptedFiles.fold<int>(0, (sum, f) => sum + f.file.size);
+        final title = hasError ? 'Transfer from ${session.senderAlias} had errors' : 'Received from ${session.senderAlias}';
+        final body = hasError
+            ? 'Some files could not be saved'
+            : (acceptedFiles.length == 1
+                  ? 'Saved ${acceptedFiles.first.desiredName} (${totalBytes.asReadableFileSize})'
+                  : 'Saved ${acceptedFiles.length} files (${totalBytes.asReadableFileSize})');
+        unawaited(showTransferCompletedNotificationAndroid(title: title, body: body));
+      }
       // Only auto-close fully successful sessions: a failed file may still be
       // retried by the sender (e.g. after a checksum mismatch), which requires
       // the session to stay open.
@@ -429,18 +498,20 @@ class ReceiveController {
           closeSession();
           _logger.info('Closing session');
 
-          // ignore: use_build_context_synchronously, discarded_futures
-          Routerino.context.pushRootImmediately(() => const HomePage(initialTab: HomeTab.receive, appStart: false));
+          if (!settings.silentCompletion) {
+            // ignore: use_build_context_synchronously, discarded_futures
+            Routerino.context.pushRootImmediately(() => const HomePage(initialTab: HomeTab.receive, appStart: false));
 
-          // open the dialog to open file instantly
-          if (filePath != null && filePath.isNotEmpty) {
-            // ignore: discarded_futures
-            OpenFileDialog.open(
-              Routerino.context, // ignore: use_build_context_synchronously
-              filePath: filePath,
-              fileType: fileType,
-              openGallery: event.savedToGallery,
-            );
+            // open the dialog to open file instantly
+            if (filePath != null && filePath.isNotEmpty) {
+              // ignore: discarded_futures
+              OpenFileDialog.open(
+                Routerino.context, // ignore: use_build_context_synchronously
+                filePath: filePath,
+                fileType: fileType,
+                openGallery: event.savedToGallery,
+              );
+            }
           }
         });
       }
@@ -460,6 +531,8 @@ class ReceiveController {
         // Already handled when the last file finished.
         break;
       case SessionEndReasonV2.cancelled:
+        _lastAndroidProgressNotif = null;
+        cancelPendingFinishSound();
         _cancelBySender(server);
     }
   }
@@ -471,6 +544,8 @@ class ReceiveController {
       return;
     }
 
+    _lastAndroidProgressNotif = null;
+    cancelPendingFinishSound();
     _cancelBySender(server);
   }
 
@@ -505,6 +580,12 @@ class ReceiveController {
       return;
     }
 
+    final sendTo = parseSendToArgs(event.args);
+    if (sendTo != null) {
+      unawaited(executeHeadlessSend(server.ref, sendTo));
+      return;
+    }
+
     // ignore: discarded_futures
     showFromTray().catchError((e) {
       // don't wait for it
@@ -526,6 +607,9 @@ class ReceiveController {
 
   /// Accepts the file request with the given [fileNameMap] (file id -> desired file name).
   Future<void> acceptFileRequest(Map<String, String> fileNameMap) async {
+    if (checkPlatform([TargetPlatform.android])) {
+      unawaited(cancelIncomingRequestNotificationAndroid());
+    }
     final session = server.getStateOrNull()?.session;
     if (session == null || session.status != SessionStatus.waiting) {
       return;
@@ -601,6 +685,30 @@ class ReceiveController {
     if (updatedSession == null) {
       return;
     }
+
+    final settings = server.ref.read(settingsProvider);
+    if (settings.playCompletionSound) {
+      unawaited(
+        playTransferStartSound(
+          preset: settings.soundPreset,
+          customPath: settings.customSoundPath,
+        ),
+      );
+    }
+    if (checkPlatform([TargetPlatform.android])) {
+      final totalBytes = updatedSession.files.values.where((f) => fileNameMap.containsKey(f.file.id)).fold<int>(0, (sum, f) => sum + f.file.size);
+      _lastAndroidProgressNotif = DateTime.now();
+      unawaited(
+        showTransferProgressNotificationAndroid(
+          title: 'Receiving from ${updatedSession.senderAlias} · 0%',
+          body: '0 B / ${totalBytes.asReadableFileSize}',
+          progress: 0,
+          max: 100,
+          indeterminate: totalBytes == 0,
+        ),
+      );
+    }
+
     server.ref
         .redux(parentIsolateProvider)
         .dispatch(IsolateHttpServerPrepareUploadDecisionAction(config: _buildReceiveConfig(updatedSession, fileNameMap)));
@@ -618,6 +726,12 @@ class ReceiveController {
   }
 
   void declineFileRequest() {
+    cancelPendingFinishSound();
+    _lastAndroidProgressNotif = null;
+    if (checkPlatform([TargetPlatform.android])) {
+      unawaited(cancelIncomingRequestNotificationAndroid());
+      unawaited(cancelTransferProgressNotificationAndroid());
+    }
     final session = server.getStateOrNull()?.session;
     if (session == null || session.status != SessionStatus.waiting) {
       return;
@@ -653,6 +767,7 @@ class ReceiveController {
   /// - cancels the session on the Rust server so that further uploads fail
   /// - notifies the sender that the session has been canceled
   void cancelSession() async {
+    cancelPendingFinishSound();
     final session = server.getStateOrNull()?.session;
     if (session == null) {
       // the server is not running
@@ -660,6 +775,10 @@ class ReceiveController {
     }
 
     // fail further uploads
+    if (checkPlatform([TargetPlatform.android])) {
+      _lastAndroidProgressNotif = null;
+      unawaited(cancelTransferProgressNotificationAndroid());
+    }
     server.ref.redux(parentIsolateProvider).dispatch(IsolateHttpServerCancelSessionAction(sessionId: session.sessionId));
 
     // notify sender
@@ -683,6 +802,9 @@ class ReceiveController {
   }
 
   void closeSession() {
+    if (checkPlatform([TargetPlatform.android])) {
+      unawaited(cancelIncomingRequestNotificationAndroid());
+    }
     final sessionId = server.getStateOrNull()?.session?.sessionId;
     if (sessionId == null) {
       return;
@@ -700,6 +822,10 @@ class ReceiveController {
 }
 
 void _cancelBySender(ServerUtils server) {
+  if (checkPlatform([TargetPlatform.android])) {
+    unawaited(cancelIncomingRequestNotificationAndroid());
+    unawaited(cancelTransferProgressNotificationAndroid());
+  }
   final receiveSession = server.getStateOrNull()?.session;
   if (receiveSession == null) {
     return;
@@ -707,7 +833,7 @@ void _cancelBySender(ServerUtils server) {
 
   TransferNotification.stop(receiveSession.sessionId);
 
-  if (receiveSession.status == SessionStatus.waiting) {
+  if (receiveSession.status == SessionStatus.waiting && Routerino.navigatorKey.currentContext != null) {
     // received cancel during accept/decline
     // pop just in case if user is in [ReceiveOptionsPage]
     Routerino.context.popUntil(ReceivePage);

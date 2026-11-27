@@ -1,6 +1,10 @@
 #include "flutter_window.h"
 
+#include <flutter/standard_method_codec.h>
+#include <mmsystem.h>
+
 #include <optional>
+#include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -25,11 +29,50 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  landrop_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "org.localsend.localsend_app/landrop_windows",
+          &flutter::StandardMethodCodec::GetInstance());
+  landrop_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<flutter::EncodableValue>& call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+             result) {
+        if (call.method_name() == "playCompletionSound") {
+          const auto* args =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          if (args != nullptr) {
+            auto it = args->find(flutter::EncodableValue("path"));
+            if (it != args->end()) {
+              const auto* path_utf8 = std::get_if<std::string>(&it->second);
+              if (path_utf8 != nullptr && !path_utf8->empty()) {
+                int len = ::MultiByteToWideChar(
+                    CP_UTF8, 0, path_utf8->data(),
+                    static_cast<int>(path_utf8->size()), nullptr, 0);
+                if (len > 0) {
+                  std::wstring wpath(static_cast<size_t>(len), L'\0');
+                  ::MultiByteToWideChar(CP_UTF8, 0, path_utf8->data(),
+                                        static_cast<int>(path_utf8->size()),
+                                        wpath.data(), len);
+                  ::PlaySoundW(wpath.c_str(), nullptr,
+                               SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+                }
+              }
+            }
+          }
+          result->Success();
+          return;
+        }
+        result->NotImplemented();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
   return true;
 }
 
 void FlutterWindow::OnDestroy() {
+  if (landrop_channel_) {
+    landrop_channel_ = nullptr;
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

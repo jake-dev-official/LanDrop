@@ -110,6 +110,31 @@ class SettingsStateMapper extends ClassMapperBase<SettingsState> {
     'minimizeToTray',
     _$minimizeToTray,
   );
+  static bool _$silentCompletion(SettingsState v) => v.silentCompletion;
+  static const Field<SettingsState, bool> _f$silentCompletion = Field(
+    'silentCompletion',
+    _$silentCompletion,
+  );
+  static bool _$playCompletionSound(SettingsState v) => v.playCompletionSound;
+  static const Field<SettingsState, bool> _f$playCompletionSound = Field(
+    'playCompletionSound',
+    _$playCompletionSound,
+  );
+  static String _$soundPreset(SettingsState v) => v.soundPreset;
+  static const Field<SettingsState, String> _f$soundPreset = Field(
+    'soundPreset',
+    _$soundPreset,
+  );
+  static String? _$customSoundPath(SettingsState v) => v.customSoundPath;
+  static const Field<SettingsState, String> _f$customSoundPath = Field(
+    'customSoundPath',
+    _$customSoundPath,
+  );
+  static bool _$backgroundKeepAlive(SettingsState v) => v.backgroundKeepAlive;
+  static const Field<SettingsState, bool> _f$backgroundKeepAlive = Field(
+    'backgroundKeepAlive',
+    _$backgroundKeepAlive,
+  );
   static bool _$https(SettingsState v) => v.https;
   static const Field<SettingsState, bool> _f$https = Field('https', _$https);
   static SendMode _$sendMode(SettingsState v) => v.sendMode;
@@ -195,6 +220,11 @@ class SettingsStateMapper extends ClassMapperBase<SettingsState> {
     #receivePin: _f$receivePin,
     #autoFinish: _f$autoFinish,
     #minimizeToTray: _f$minimizeToTray,
+    #silentCompletion: _f$silentCompletion,
+    #playCompletionSound: _f$playCompletionSound,
+    #soundPreset: _f$soundPreset,
+    #customSoundPath: _f$customSoundPath,
+    #backgroundKeepAlive: _f$backgroundKeepAlive,
     #https: _f$https,
     #sendMode: _f$sendMode,
     #saveWindowPlacement: _f$saveWindowPlacement,
@@ -230,6 +260,11 @@ class SettingsStateMapper extends ClassMapperBase<SettingsState> {
       receivePin: data.dec(_f$receivePin),
       autoFinish: data.dec(_f$autoFinish),
       minimizeToTray: data.dec(_f$minimizeToTray),
+      silentCompletion: data.dec(_f$silentCompletion),
+      playCompletionSound: data.dec(_f$playCompletionSound),
+      soundPreset: data.dec(_f$soundPreset),
+      customSoundPath: data.dec(_f$customSoundPath),
+      backgroundKeepAlive: data.dec(_f$backgroundKeepAlive),
       https: data.dec(_f$https),
       sendMode: data.dec(_f$sendMode),
       saveWindowPlacement: data.dec(_f$saveWindowPlacement),
@@ -331,6 +366,11 @@ abstract class SettingsStateCopyWith<$R, $In extends SettingsState, $Out>
     String? receivePin,
     bool? autoFinish,
     bool? minimizeToTray,
+    bool? silentCompletion,
+    bool? playCompletionSound,
+    String? soundPreset,
+    String? customSoundPath,
+    bool? backgroundKeepAlive,
     bool? https,
     SendMode? sendMode,
     bool? saveWindowPlacement,
@@ -394,6 +434,11 @@ class _SettingsStateCopyWithImpl<$R, $Out>
     Object? receivePin = $none,
     bool? autoFinish,
     bool? minimizeToTray,
+    bool? silentCompletion,
+    bool? playCompletionSound,
+    String? soundPreset,
+    Object? customSoundPath = $none,
+    bool? backgroundKeepAlive,
     bool? https,
     SendMode? sendMode,
     bool? saveWindowPlacement,
@@ -428,6 +473,13 @@ class _SettingsStateCopyWithImpl<$R, $Out>
       if (receivePin != $none) #receivePin: receivePin,
       if (autoFinish != null) #autoFinish: autoFinish,
       if (minimizeToTray != null) #minimizeToTray: minimizeToTray,
+      if (silentCompletion != null) #silentCompletion: silentCompletion,
+      if (playCompletionSound != null)
+        #playCompletionSound: playCompletionSound,
+      if (soundPreset != null) #soundPreset: soundPreset,
+      if (customSoundPath != $none) #customSoundPath: customSoundPath,
+      if (backgroundKeepAlive != null)
+        #backgroundKeepAlive: backgroundKeepAlive,
       if (https != null) #https: https,
       if (sendMode != null) #sendMode: sendMode,
       if (saveWindowPlacement != null)
@@ -469,6 +521,17 @@ class _SettingsStateCopyWithImpl<$R, $Out>
     receivePin: data.get(#receivePin, or: $value.receivePin),
     autoFinish: data.get(#autoFinish, or: $value.autoFinish),
     minimizeToTray: data.get(#minimizeToTray, or: $value.minimizeToTray),
+    silentCompletion: data.get(#silentCompletion, or: $value.silentCompletion),
+    playCompletionSound: data.get(
+      #playCompletionSound,
+      or: $value.playCompletionSound,
+    ),
+    soundPreset: data.get(#soundPreset, or: $value.soundPreset),
+    customSoundPath: data.get(#customSoundPath, or: $value.customSoundPath),
+    backgroundKeepAlive: data.get(
+      #backgroundKeepAlive,
+      or: $value.backgroundKeepAlive,
+    ),
     https: data.get(#https, or: $value.https),
     sendMode: data.get(#sendMode, or: $value.sendMode),
     saveWindowPlacement: data.get(

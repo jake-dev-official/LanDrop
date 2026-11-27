@@ -192,8 +192,8 @@ impl ServerHandle {
     /// Cancels the active v2 upload session if it matches `session_id`,
     /// e.g. because the user aborted the transfer on the receiving side.
     ///
-    /// Uploads that are already in progress still run to completion, but new
-    /// upload requests fail and a new session can be created.
+    /// In-progress uploads are aborted immediately, new upload requests fail,
+    /// and a new session can be created.
     /// No [ServerEventV2::SessionEnd] is emitted: the application initiated
     /// the cancellation itself.
     ///
@@ -205,6 +205,7 @@ impl ServerHandle {
         let mut slot = v2.session.lock().await;
         match slot.as_ref() {
             Some(SessionStateV2::Active(session)) if session.session_id == session_id => {
+                session.cancel.cancel();
                 *slot = None;
                 true
             }

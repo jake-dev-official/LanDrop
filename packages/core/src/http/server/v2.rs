@@ -376,6 +376,7 @@ pub(crate) async fn prepare_upload(
             session_id: session_id.clone(),
             sender_ip: client_info.ip,
             files,
+            cancel: CancellationToken::new(),
         }));
     }
     pending_guard.disarm();
@@ -412,7 +413,7 @@ pub(crate) async fn upload(
     };
 
     // Validate the request and mark the file as in progress.
-    let file_dto = {
+    let (file_dto, session_cancel) = {
         let mut slot = v2.session.lock().await;
         let Some(SessionStateV2::Active(session)) = slot.as_mut() else {
             return Err(invalid_token_error());
@@ -428,7 +429,7 @@ pub(crate) async fn upload(
         }
         file.status = FileStatusV2::InProgress;
         file.attempts = file.attempts.saturating_add(1);
-        file.dto.clone()
+        (file.dto.clone(), session.cancel.clone())
     };
 
     // Marks the file as failed if this request is aborted mid-transfer.
@@ -459,9 +460,22 @@ pub(crate) async fn upload(
         return Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
-    let Ok(target) = target_rx.await else {
-        upload_guard.finish(SaveResult::Failed).await;
-        return Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR));
+    let target = tokio::select! {
+        biased;
+        _ = session_cancel.cancelled() => {
+            upload_guard.finish(SaveResult::Failed).await;
+            return Err(AppError::Message(
+                StatusCode::FORBIDDEN,
+                "Cancelled".to_string(),
+            ));
+        }
+        res = target_rx => match res {
+            Ok(target) => target,
+            Err(_) => {
+                upload_guard.finish(SaveResult::Failed).await;
+                return Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR));
+            }
+        }
     };
 
     let result = common::save::save_req_to_target(
@@ -470,10 +484,18 @@ pub(crate) async fn upload(
         file_size,
         expected_sha256.as_deref(),
         timestamps,
+        session_cancel.clone(),
     )
     .await;
 
     upload_guard.finish(result).await;
+
+    if session_cancel.is_cancelled() {
+        return Err(AppError::Message(
+            StatusCode::FORBIDDEN,
+            "Cancelled".to_string(),
+        ));
+    }
 
     match result {
         SaveResult::Success => Ok(Response::new(empty_body())),
@@ -528,6 +550,7 @@ pub(crate) async fn cancel(
                 Some(SessionStateV2::Active(session))
                     if session.session_id == *session_id && session.sender_ip == client_info.ip =>
                 {
+                    session.cancel.cancel();
                     *slot = None;
                     true
                 }

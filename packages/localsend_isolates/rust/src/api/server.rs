@@ -663,8 +663,8 @@ impl RsHttpServer {
     /// Cancels the active upload session, e.g. because the user aborted the
     /// transfer on the receiving side.
     ///
-    /// Uploads that are already in progress still run to completion, but new
-    /// upload requests fail and a new session can be created.
+    /// In-progress uploads are aborted immediately, new upload requests fail,
+    /// and a new session can be created.
     /// No [RsServerEvent::SessionEnd] is emitted: the application initiated
     /// the cancellation itself.
     pub async fn cancel_session(&self, session_id: String) {

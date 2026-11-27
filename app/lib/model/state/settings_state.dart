@@ -27,6 +27,11 @@ class SettingsState with SettingsStateMappable {
   final String? receivePin; // null = disabled
   final bool autoFinish; // automatically finish sessions
   final bool minimizeToTray; // minimize to tray instead of exiting the app
+  final bool silentCompletion; // complete quick-save transfers silently without opening UI
+  final bool playCompletionSound; // play a sound when transfers start and complete
+  final String soundPreset; // selected sound preset id or 'custom'
+  final String? customSoundPath; // copied path to custom notification sound
+  final bool backgroundKeepAlive; // keep Android foreground listener active in background
   final bool https;
   final SendMode sendMode;
   final bool saveWindowPlacement;
@@ -60,6 +65,11 @@ class SettingsState with SettingsStateMappable {
     required this.receivePin,
     required this.autoFinish,
     required this.minimizeToTray,
+    required this.silentCompletion,
+    required this.playCompletionSound,
+    required this.soundPreset,
+    required this.customSoundPath,
+    required this.backgroundKeepAlive,
     required this.https,
     required this.sendMode,
     required this.saveWindowPlacement,

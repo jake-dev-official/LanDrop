@@ -15,7 +15,11 @@ import 'package:localsend_app/pages/whats_new_page.dart';
 import 'package:localsend_app/provider/animation_provider.dart';
 import 'package:localsend_app/provider/app_arguments_provider.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
+import 'package:localsend_app/provider/favorites_provider.dart';
+import 'package:localsend_app/provider/known_devices_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
+import 'package:localsend_app/provider/network/pending_send_provider.dart';
+import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
 import 'package:localsend_app/provider/network/webrtc/signaling_provider.dart';
 import 'package:localsend_app/provider/persistence_provider.dart';
@@ -36,9 +40,11 @@ import 'package:localsend_app/util/native/context_menu_helper.dart';
 import 'package:localsend_app/util/native/cross_file_converters.dart';
 import 'package:localsend_app/util/native/device_info_helper.dart';
 import 'package:localsend_app/util/native/exit_helper.dart';
+import 'package:localsend_app/util/native/headless_send_helper.dart';
 import 'package:localsend_app/util/native/macos_channel.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:localsend_app/util/native/tray_helper.dart';
+import 'package:localsend_app/util/native/windows_device_cache.dart';
 import 'package:localsend_app/util/notification_strings.dart';
 import 'package:localsend_app/util/ui/dynamic_colors.dart';
 import 'package:localsend_app/util/ui/snackbar.dart';
@@ -47,6 +53,7 @@ import 'package:localsend_app/widget/dialogs/whats_new_dialog.dart';
 import 'package:localsend_isolates/isolate.dart';
 import 'package:localsend_isolates/model/dto/file_dto.dart';
 import 'package:localsend_isolates/model/dto/multicast_dto.dart';
+import 'package:localsend_isolates/model/session_status.dart';
 import 'package:localsend_isolates/rust/api/logging.dart' as rust_logging;
 import 'package:localsend_isolates/util/logger.dart';
 import 'package:localsend_isolates/util/rust_init.dart';
@@ -61,6 +68,9 @@ import 'package:share_handler/share_handler.dart';
 import 'package:window_manager/window_manager.dart';
 
 final _logger = Logger('Init');
+bool _discoveryListenerStarted = false;
+bool _androidCancelHandlerRegistered = false;
+bool _cacheClearedOnce = false;
 
 /// Will be called before the MaterialApp started
 Future<RefenaContainer> preInit(List<String> args) async {
@@ -136,7 +146,7 @@ Future<RefenaContainer> preInit(List<String> args) async {
       await windowManager.setAlwaysOnTop(persistenceService.getAlwaysOnTop());
     }
     await WindowDimensionsController(persistenceService).initDimensionsConfiguration();
-    if (args.contains(startHiddenFlag)) {
+    if (args.contains(startHiddenFlag) || (parseSendToArgs(args) != null && persistenceService.isSilentCompletion())) {
       // keep this app hidden
       startHidden = true;
     } else if (defaultTargetPlatform == TargetPlatform.macOS) {
@@ -197,7 +207,58 @@ Future<RefenaContainer> preInit(List<String> args) async {
     }),
   );
 
+  if (defaultTargetPlatform == TargetPlatform.windows && !persistenceService.isPortableMode()) {
+    if (!persistenceService.isAutoStartInitialized()) {
+      await enableAutoStart(startHidden: true);
+      await persistenceService.setAutoStartInitialized(true);
+    }
+  }
+
   await container.redux(parentIsolateProvider).dispatchAsync(IsolateSetupAction());
+
+  if (checkPlatform([TargetPlatform.android])) {
+    if (!_androidCancelHandlerRegistered) {
+      _androidCancelHandlerRegistered = true;
+      registerAndroidCancelTransferHandler(() {
+        final receiveSession = container.read(serverProvider)?.session;
+        if (receiveSession != null) {
+          if (receiveSession.status == SessionStatus.waiting) {
+            container.notifier(serverProvider).declineFileRequest();
+          } else {
+            container.notifier(serverProvider).cancelSession();
+          }
+        }
+        final sendSessions = container.read(sendProvider);
+        for (final session in sendSessions.values.toList()) {
+          container.notifier(sendProvider).cancelSession(session.sessionId);
+        }
+      });
+    }
+
+    try {
+      await container.notifier(serverProvider).startServerFromSettings();
+    } catch (e) {
+      _logger.warning('Headless Android server start failed', e);
+    }
+
+    if (container.read(settingsProvider).backgroundKeepAlive) {
+      TransferNotification.setKeepAlive(
+        enabled: true,
+        channelName: 'LanDrop Background',
+        idleTitle: 'LanDrop ready',
+        idleText: 'Listening on local network',
+      );
+    }
+
+    if (!_discoveryListenerStarted) {
+      _discoveryListenerStarted = true;
+      try {
+        container.redux(nearbyDevicesProvider).dispatchAsync(StartDiscoveryListener()); // ignore: unawaited_futures
+      } catch (e) {
+        _logger.warning('Starting discovery listener failed', e);
+      }
+    }
+  }
 
   return container;
 }
@@ -238,10 +299,32 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
     }
   }
 
-  try {
-    ref.redux(nearbyDevicesProvider).dispatchAsync(StartDiscoveryListener()); // ignore: unawaited_futures
-  } catch (e) {
-    _logger.warning('Starting discovery listener failed', e);
+  if (checkPlatform([TargetPlatform.android]) && ref.read(settingsProvider).backgroundKeepAlive) {
+    TransferNotification.setKeepAlive(
+      enabled: true,
+      channelName: 'LanDrop Background',
+      idleTitle: 'LanDrop ready',
+      idleText: 'Listening on local network',
+    );
+  }
+
+  if (checkPlatform([TargetPlatform.windows])) {
+    unawaited(
+      syncWindowsDeviceCache(
+        favorites: ref.read(favoritesProvider),
+        nearbyDevices: ref.read(nearbyDevicesProvider).devices,
+        knownDevices: ref.read(knownDevicesProvider),
+      ),
+    );
+  }
+
+  if (!_discoveryListenerStarted) {
+    _discoveryListenerStarted = true;
+    try {
+      ref.redux(nearbyDevicesProvider).dispatchAsync(StartDiscoveryListener()); // ignore: unawaited_futures
+    } catch (e) {
+      _logger.warning('Starting discovery listener failed', e);
+    }
   }
 
   // ignore: dead_code
@@ -299,6 +382,7 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
 
     _sharedMediaSubscription?.cancel(); // ignore: unawaited_futures
     _sharedMediaSubscription = shareHandler.sharedMediaStream.listen((SharedMedia payload) async {
+      hasInitialShare = true;
       await ref.global.dispatchAsync(
         _HandleShareIntentAction(
           payload: payload,
@@ -313,9 +397,11 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
     }
   }
 
-  if (appStart && !hasInitialShare && (checkPlatformWithGallery() || checkPlatformCanReceiveShareIntent())) {
-    // Clear cache on every app start.
-    // If we received a share intent, then don't clear it, otherwise the shared file will be lost.
+  final hasActiveFiles =
+      ref.read(selectedSendingFilesProvider).isNotEmpty || ref.read(sendProvider).isNotEmpty || ref.read(pendingSendProvider).isNotEmpty;
+  if (appStart && !_cacheClearedOnce && !hasInitialShare && !hasActiveFiles && (checkPlatformWithGallery() || checkPlatformCanReceiveShareIntent())) {
+    // Clear cache on first app start when no shared media or active transfer is in flight.
+    _cacheClearedOnce = true;
     ref.global.dispatchAsync(ClearCacheAction()); // ignore: unawaited_futures
   }
 
@@ -385,6 +471,11 @@ class _HandleAppStartArgumentsAction extends AsyncGlobalAction {
 
   @override
   Future<void> reduce() async {
+    final sendTo = parseSendToArgs(args);
+    if (sendTo != null) {
+      await executeHeadlessSend(ref, sendTo);
+      return;
+    }
     final filesAdded = await ref.redux(selectedSendingFilesProvider).dispatchAsyncTakeResult(LoadSelectionFromArgsAction(args));
     if (filesAdded) {
       ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));

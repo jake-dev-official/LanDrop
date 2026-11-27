@@ -85,6 +85,9 @@ Future<void> hideToTray() async {
 }
 
 Future<void> showFromTray() async {
+  if (await windowManager.isMinimized()) {
+    await windowManager.restore();
+  }
   await windowManager.show();
   await windowManager.focus();
   if (checkPlatform([TargetPlatform.macOS])) {

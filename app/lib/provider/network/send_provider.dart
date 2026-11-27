@@ -11,9 +11,14 @@ import 'package:localsend_app/pages/send_page.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
 import 'package:localsend_app/provider/file_transfer_provider.dart';
 import 'package:localsend_app/provider/http_provider.dart';
+import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/message_preview.dart';
+import 'package:localsend_app/util/native/channel/android_channel.dart';
+import 'package:localsend_app/util/native/completion_sound_helper.dart';
+import 'package:localsend_app/util/native/platform_check.dart';
+import 'package:localsend_app/util/native/tray_helper.dart';
 import 'package:localsend_app/widget/dialogs/pin_dialog.dart';
 import 'package:localsend_isolates/isolate.dart';
 import 'package:localsend_isolates/model/device.dart';
@@ -25,6 +30,8 @@ import 'package:localsend_isolates/rust/api/cancel.dart' as rust_cancel;
 import 'package:localsend_isolates/rust/api/http.dart' as rust_http;
 import 'package:localsend_isolates/rust/api/model.dart' as rust_model;
 import 'package:localsend_isolates/util/file_hash.dart';
+import 'package:localsend_isolates/util/file_size_helper.dart';
+import 'package:localsend_isolates/util/file_speed_helper.dart';
 import 'package:localsend_isolates/util/rust.dart';
 import 'package:localsend_isolates/util/sleep.dart';
 import 'package:localsend_isolates/util/transfer_notification.dart';
@@ -47,6 +54,8 @@ final sendProvider = NotifierProvider<SendNotifier, Map<String, SendSessionState
 });
 
 class SendNotifier extends Notifier<Map<String, SendSessionState>> {
+  DateTime? _lastAndroidProgressNotif;
+
   SendNotifier();
 
   /// Cancel tokens of the running checksum calculations.
@@ -349,6 +358,7 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
             // Only a request without any response says that the address
             // cannot be dialed; a canceled request does not.
             _reportOutbound(target, error: e.field0);
+            ref.redux(nearbyDevicesProvider).dispatch(RemoveFoundDeviceAction(target.fingerprint));
           } else if (e is rust_http.RsHttpClientError_Reqwest) {
             // The peer answered, its response just could not be read.
             _reportOutbound(target);
@@ -481,6 +491,29 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     // foreground, because Android 12+ rejects starting a foreground service from the background.
     TransferNotification.start(sessionId: sessionId, receiving: false);
 
+    final settings = ref.read(settingsProvider);
+    if (settings.playCompletionSound) {
+      unawaited(
+        playTransferStartSound(
+          preset: settings.soundPreset,
+          customPath: settings.customSoundPath,
+        ),
+      );
+    }
+    if (checkPlatform([TargetPlatform.android])) {
+      final totalBytes = sendingFiles.values.where((f) => f.token != null).fold<int>(0, (sum, f) => sum + f.file.size);
+      _lastAndroidProgressNotif = DateTime.now();
+      unawaited(
+        showTransferProgressNotificationAndroid(
+          title: 'Sending to ${target.alias} · 0%',
+          body: '0 B / ${totalBytes.asReadableFileSize}',
+          progress: 0,
+          max: 100,
+          indeterminate: totalBytes == 0,
+        ),
+      );
+    }
+
     await _sendLoop(sessionId, sendingFiles);
   }
 
@@ -513,13 +546,18 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   /// Reports the total session progress to the foreground service notification,
   /// so that it stays up to date while the app is minimized.
   void _updateForegroundServiceProgress(String sessionId) {
-    if (!TransferNotification.shouldUpdate) {
+    final now = DateTime.now();
+    final shouldUpdateNotif = TransferNotification.shouldUpdate;
+    final shouldUpdateAndroidBar =
+        checkPlatform([TargetPlatform.android]) &&
+        (_lastAndroidProgressNotif == null || now.difference(_lastAndroidProgressNotif!).inMilliseconds >= 300);
+    if (!shouldUpdateNotif && !shouldUpdateAndroidBar) {
       // Checked before the sum below because progress events arrive several times per second per file.
       return;
     }
 
     final session = state[sessionId];
-    if (session == null) {
+    if (session == null || session.status != SessionStatus.sending) {
       return;
     }
 
@@ -536,13 +574,31 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       currentBytes += (transferNotifier.getProgress(sessionId: sessionId, fileId: sendingFile.file.id) * size).round();
     }
 
-    TransferNotification.update(
-      sessionId: sessionId,
-      currentBytes: currentBytes,
-      totalBytes: totalBytes,
-      startTime: session.startTime,
-      endTime: session.endTime,
-    );
+    if (shouldUpdateNotif && !checkPlatform([TargetPlatform.android])) {
+      TransferNotification.update(
+        sessionId: sessionId,
+        currentBytes: currentBytes,
+        totalBytes: totalBytes,
+        startTime: session.startTime,
+        endTime: session.endTime,
+      );
+    }
+
+    if (shouldUpdateAndroidBar) {
+      _lastAndroidProgressNotif = now;
+      final percent = totalBytes == 0 ? 0 : ((100 * currentBytes) ~/ totalBytes).clamp(0, 100);
+      final speed = measureSpeed(startTime: session.startTime, endTime: session.endTime, bytes: currentBytes);
+      final speedPart = (speed != null && speed > 0) ? ' · ${speed.asReadableFileSize}/s' : '';
+      unawaited(
+        showTransferProgressNotificationAndroid(
+          title: 'Sending to ${session.target.alias} · $percent%',
+          body: '${currentBytes.asReadableFileSize} / ${totalBytes.asReadableFileSize}$speedPart',
+          progress: percent,
+          max: 100,
+          indeterminate: totalBytes == 0,
+        ),
+      );
+    }
   }
 
   Future<void> _sendLoop(String sessionId, Map<String, SendingFile> files) async {
@@ -570,8 +626,40 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
 
     if (state[sessionId]!.status != SessionStatus.sending) {
       _logger.info('Transfer was canceled.');
+      cancelPendingFinishSound();
+      if (checkPlatform([TargetPlatform.android])) {
+        _lastAndroidProgressNotif = null;
+        unawaited(cancelTransferProgressNotificationAndroid());
+      }
     } else {
       final hasError = ref.read(fileTransferProvider).getStatuses(sessionId).any((status) => status == FileStatus.failed);
+      final canceledByReceiver = hasError && sessionState.files.values.any((f) => f.errorMessage?.contains('Cancelled') == true);
+      final settings = ref.read(settingsProvider);
+      if (!hasError && settings.playCompletionSound) {
+        unawaited(
+          playTransferFinishSound(
+            preset: settings.soundPreset,
+            customPath: settings.customSoundPath,
+          ),
+        );
+      }
+      if (checkPlatform([TargetPlatform.android])) {
+        _lastAndroidProgressNotif = null;
+        if (canceledByReceiver) {
+          cancelPendingFinishSound();
+          unawaited(cancelTransferProgressNotificationAndroid());
+        } else {
+          final sentFiles = sessionState.files.values.where((f) => f.token != null).toList();
+          final totalBytes = sentFiles.fold<int>(0, (sum, f) => sum + f.file.size);
+          final title = hasError ? 'Send to ${sessionState.target.alias} failed' : 'Sent to ${sessionState.target.alias}';
+          final body = hasError
+              ? 'Some files could not be sent'
+              : (sentFiles.length == 1
+                    ? 'Sent ${sentFiles.first.file.fileName} (${totalBytes.asReadableFileSize})'
+                    : 'Sent ${sentFiles.length} files (${totalBytes.asReadableFileSize})');
+          unawaited(showTransferCompletedNotificationAndroid(title: title, body: body));
+        }
+      }
       if (!hasError && sessionState.background == true) {
         // close session because everything is fine and it is in background
         closeSession(sessionId);
@@ -588,6 +676,9 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
 
         if (hasError) {
           _logger.info('Transfer finished with errors.');
+          if (sessionState.background == true && checkPlatformHasTray()) {
+            unawaited(showFromTray());
+          }
         } else {
           _logger.info('Transfer finished successfully.');
         }
@@ -718,8 +809,13 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
                   fileId: event.fileId,
                   progress: 1,
                 );
-            _updateForegroundServiceProgress(sessionId);
             ref.notifier(fileTransferProvider).setStatus(sessionId: sessionId, fileId: event.fileId, status: FileStatus.finished);
+            if (state[sessionId]?.status == SessionStatus.sending) {
+              final statuses = ref.read(fileTransferProvider).getStatuses(sessionId);
+              if (!statuses.isFinishedOrError) {
+                _updateForegroundServiceProgress(sessionId);
+              }
+            }
           case HttpUploadFileFailedEvent():
             _logger.warning('Error while sending file ${state[sessionId]?.files[event.fileId]?.file.fileName}: ${event.error}');
             ref.notifier(fileTransferProvider).setStatus(sessionId: sessionId, fileId: event.fileId, status: FileStatus.failed);
@@ -765,9 +861,14 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
 
   /// Closes the send-session and sends a cancel event to the receiver.
   void cancelSession(String sessionId) {
+    cancelPendingFinishSound();
     final sessionState = state[sessionId];
     if (sessionState == null) {
       return;
+    }
+    if (checkPlatform([TargetPlatform.android])) {
+      _lastAndroidProgressNotif = null;
+      unawaited(cancelTransferProgressNotificationAndroid());
     }
     final remoteSessionId = sessionState.remoteSessionId;
 
@@ -804,11 +905,16 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   }
 
   void cancelSessionByReceiver(String sessionId) {
+    cancelPendingFinishSound();
     final sessionState = state[sessionId];
     if (sessionState == null) {
       return;
     }
     TransferNotification.stop(sessionId);
+    if (checkPlatform([TargetPlatform.android])) {
+      _lastAndroidProgressNotif = null;
+      unawaited(cancelTransferProgressNotificationAndroid());
+    }
     _cancelRunningRequests(sessionState);
 
     state = state.updateSession(
@@ -852,6 +958,11 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
   }
 
   void clearAllSessions() {
+    cancelPendingFinishSound();
+    if (checkPlatform([TargetPlatform.android])) {
+      _lastAndroidProgressNotif = null;
+      unawaited(cancelTransferProgressNotificationAndroid());
+    }
     for (final sessionId in state.keys) {
       TransferNotification.stop(sessionId);
     }

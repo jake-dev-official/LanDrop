@@ -9,6 +9,7 @@ import 'package:refena_flutter/refena_flutter.dart';
 import 'package:yaru/yaru.dart' as yaru;
 
 final _borderRadius = BorderRadius.circular(5);
+const _lanDropBlue = Color(0xFF2563EB);
 
 ThemeData getTheme(ColorMode colorMode, Color customColor, Brightness brightness, DynamicColors? dynamicColors) {
   if (colorMode == ColorMode.yaru) {
@@ -141,10 +142,27 @@ extension InputDecorationThemeExt on InputDecorationThemeData {
 }
 
 ColorScheme _determineColorScheme(ColorMode mode, Color customColor, Brightness brightness, DynamicColors? dynamicColors) {
-  final defaultColorScheme = ColorScheme.fromSeed(
-    seedColor: Colors.teal,
+  final baseSeed = ColorScheme.fromSeed(
+    seedColor: _lanDropBlue,
     brightness: brightness,
   );
+  final defaultColorScheme = brightness == Brightness.dark
+      ? baseSeed.copyWith(
+          primary: const Color(0xFF3B82F6),
+          onPrimary: Colors.white,
+          primaryContainer: const Color(0xFF1E3A8A),
+          onPrimaryContainer: const Color(0xFFDBEAFE),
+          secondary: const Color(0xFF60A5FA),
+          secondaryContainer: const Color(0xFF1E293B),
+          onSecondaryContainer: const Color(0xFFE2E8F0),
+          surface: const Color(0xFF14161A),
+          surfaceContainerLowest: const Color(0xFF0E1014),
+          surfaceContainerLow: const Color(0xFF1A1D23),
+          surfaceContainer: const Color(0xFF20242C),
+          surfaceContainerHigh: const Color(0xFF272C36),
+          surfaceContainerHighest: const Color(0xFF303642),
+        )
+      : baseSeed;
 
   final colorScheme = switch (mode) {
     ColorMode.system => brightness == Brightness.light ? dynamicColors?.light : dynamicColors?.dark,

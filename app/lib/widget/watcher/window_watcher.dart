@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/provider/animation_provider.dart';
+import 'package:localsend_app/provider/local_ip_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/provider/window_dimensions_provider.dart';
 import 'package:localsend_app/util/native/exit_helper.dart';
@@ -113,6 +114,7 @@ class _WindowWatcherState extends State<WindowWatcher> with WindowListener, Refe
   void onWindowFocus() {
     // call set state according to window_manager README
     setState(() {});
+    unawaited(ref.redux(localIpProvider).dispatchAsync(FetchLocalIpAction()));
   }
 
   @override

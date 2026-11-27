@@ -42,11 +42,20 @@ class $AssetsImgGen {
   List<dynamic> get values => [logo128, logo256, logo32Black, logo32White, logo32, logo512White, logo512, logo];
 }
 
-class Assets {
-  const Assets._();
+class $AssetsSoundGen {
+  const $AssetsSoundGen();
 
+  /// File path: assets/sound/pop.wav
+  String get pop => 'assets/sound/pop.wav';
+
+  /// List of all assets
+  List<String> get values => [pop];
+}
+
+abstract final class Assets {
   static const String changelog = 'assets/CHANGELOG.md';
   static const $AssetsImgGen img = $AssetsImgGen();
+  static const $AssetsSoundGen sound = $AssetsSoundGen();
 
   /// List of all assets
   static List<String> get values => [changelog];

@@ -193,6 +193,11 @@ Future<void> setupHttpUploadIsolate(
                     );
                 break;
               } on RsHttpClientError_StatusCode catch (e) {
+                if (e.status == 403) {
+                  cancelToken.cancel();
+                  ref.read(_cancelTokenProvider).remove(task.id);
+                  rethrow;
+                }
                 if (e.status != 422 || attempt >= _maxUploadAttempts) {
                   rethrow;
                 }
