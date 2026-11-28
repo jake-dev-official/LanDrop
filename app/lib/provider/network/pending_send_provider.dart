@@ -81,7 +81,7 @@ class PendingSendNotifier extends Notifier<List<PendingSendEntry>> {
     final online = ref.read(nearbyDevicesProvider).devices[target.fingerprint];
     final isTargetOnline = online != null && (online.ip?.isNotEmpty ?? false);
     if (!busy && isTargetOnline) {
-      await ref.notifier(sendProvider).startSession(target: online, files: files, background: background);
+      unawaited(ref.notifier(sendProvider).startSession(target: online, files: files, background: background));
       return false;
     }
 

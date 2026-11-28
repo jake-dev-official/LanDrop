@@ -277,7 +277,7 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
       }
       await _dispatchSend(target, files, suppressSnackbar: shouldAutoClose);
       if (shouldAutoClose) {
-        unawaited(android_channel.moveTaskToBackAndroid());
+        await android_channel.moveTaskToBackAndroid();
       }
       return;
     }

@@ -1,5 +1,6 @@
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
+import 'package:localsend_app/config/init.dart' show ensureIsolatesReady;
 import 'package:localsend_app/model/cross_file.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/send_mode.dart';
@@ -227,6 +228,7 @@ class SendTabInitAction extends AsyncGlobalAction {
 
   @override
   Future<void> reduce() async {
+    await ensureIsolatesReady();
     final devices = ref.read(nearbyDevicesProvider).devices;
     if (devices.isEmpty) {
       await dispatchAsync(StartSmartScan());

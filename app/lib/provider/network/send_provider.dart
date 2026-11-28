@@ -174,201 +174,253 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       );
     }
 
-    // Calculate the checksums which are part of the request.
-    // The files are read and hashed in Rust, one file after another.
-    final hashes = <String, String>{};
-    if (createChecksums) {
-      final hashCancelToken = rust_cancel.createCancellationToken();
-      _hashCancelTokens[sessionId] = hashCancelToken;
+    if (checkPlatform([TargetPlatform.android])) {
+      // Start before awaiting checksums/network so Android 12+ allows foreground start
+      // even if the activity moves to background immediately after picking a device.
+      TransferNotification.start(sessionId: sessionId, receiving: false);
+    }
+
+    var handedToSendLoop = false;
+    try {
+      // Calculate the checksums which are part of the request.
+      // The files are read and hashed in Rust, one file after another.
+      final hashes = <String, String>{};
+      if (createChecksums) {
+        final hashCancelToken = rust_cancel.createCancellationToken();
+        _hashCancelTokens[sessionId] = hashCancelToken;
+        try {
+          for (final (:id, :file) in selectedFiles) {
+            try {
+              hashes[id] = await calculateFileHash(
+                path: file.path,
+                bytes: file.bytes,
+                cancelToken: hashCancelToken,
+                onProgress: (bytes) {
+                  if (state[sessionId] == null) {
+                    // session has been canceled while calculating the checksums
+                    return;
+                  }
+                  ref
+                      .notifier(fileTransferProvider)
+                      .setProgress(
+                        sessionId: sessionId,
+                        fileId: id,
+                        progress: file.size == 0 ? 1 : (bytes / file.size).clamp(0, 1),
+                      );
+                },
+              );
+            } catch (e) {
+              if (state[sessionId] != null) {
+                // Sending the checksum is optional, so a file that cannot be read
+                // here still gets a chance to be sent.
+                // Errors caused by the cancellation are not logged.
+                _logger.warning('Could not calculate the checksum of ${file.name}', e);
+              }
+            }
+
+            if (state[sessionId] == null) {
+              // session has been canceled while calculating the checksums
+              return;
+            }
+
+            // Also set for files whose hashing failed, so the progress bar stays
+            // consistent with the files that are left.
+            ref.notifier(fileTransferProvider).setProgress(sessionId: sessionId, fileId: id, progress: 1);
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(hashedFileCount: s.hashedFileCount + 1),
+            );
+          }
+        } finally {
+          _hashCancelTokens.remove(sessionId);
+        }
+      }
+
+      final hashedState = state[sessionId];
+      if (hashedState == null) {
+        // session has been canceled while calculating the checksums
+        return;
+      }
+
+      final requestState = hashedState.copyWith(
+        files: hashedState.files.map(
+          (id, sendingFile) => MapEntry(id, sendingFile.copyWith(file: sendingFile.file.withHash(hashes[id]))),
+        ),
+      );
+      state = state.updateSession(
+        sessionId: sessionId,
+        state: (_) => requestState,
+      );
+
+      final originDevice = ref.read(deviceFullInfoProvider);
+      final requestDto = rust_model.PrepareUploadRequestDto(
+        info: rust_model.RegisterDto(
+          alias: originDevice.alias,
+          version: originDevice.version,
+          deviceModel: originDevice.deviceModel,
+          deviceType: originDevice.deviceType.toRust(),
+          token: originDevice.fingerprint,
+          port: originDevice.port,
+          protocol: originDevice.https ? rust_model.ProtocolType.https : rust_model.ProtocolType.http,
+          hasWebInterface: originDevice.download,
+        ),
+        files: {
+          for (final entry in requestState.files.entries) entry.key: entry.value.file.toRust(),
+        },
+      );
+
+      rust_http.PrepareUploadResult? response;
+      bool invalidPin;
+      bool pinFirstAttempt = true;
+
+      String? pin;
+      final prepareUploadCancelToken = rust_cancel.createCancellationToken();
+      _prepareUploadCancelTokens[sessionId] = prepareUploadCancelToken;
       try {
-        for (final (:id, :file) in selectedFiles) {
+        do {
+          invalidPin = false;
           try {
-            hashes[id] = await calculateFileHash(
-              path: file.path,
-              bytes: file.bytes,
-              cancelToken: hashCancelToken,
-              onProgress: (bytes) {
+            response = await client.prepareUpload(
+              protocol: target.getProtocolType(),
+              ip: target.ip!,
+              port: target.port,
+              payload: requestDto,
+              // The peer is already verified during the TLS handshake by the
+              // fingerprint the client is pinned to.
+              publicKey: null,
+              pin: pin,
+              cancelToken: prepareUploadCancelToken,
+            );
+            // Every answered request is reported: a failure observed in the
+            // meantime (e.g. while the PIN dialog was open) must be overwritten.
+            _reportOutbound(target);
+          } on rust_http.RsHttpClientError_StatusCode catch (e) {
+            // Declined, busy, wrong PIN, ...: the peer answered, so it was reached.
+            _reportOutbound(target);
+            switch (e.status) {
+              case 401:
+                invalidPin = true;
+
+                // wait until animation is finished
+                await sleepAsync(500);
                 if (state[sessionId] == null) {
-                  // session has been canceled while calculating the checksums
+                  // session has been canceled in the meantime
                   return;
                 }
-                ref
-                    .notifier(fileTransferProvider)
-                    .setProgress(
-                      sessionId: sessionId,
-                      fileId: id,
-                      progress: file.size == 0 ? 1 : (bytes / file.size).clamp(0, 1),
-                    );
-              },
-            );
-          } catch (e) {
-            if (state[sessionId] != null) {
-              // Sending the checksum is optional, so a file that cannot be read
-              // here still gets a chance to be sent.
-              // Errors caused by the cancellation are not logged.
-              _logger.warning('Could not calculate the checksum of ${file.name}', e);
-            }
-          }
 
-          if (state[sessionId] == null) {
-            // session has been canceled while calculating the checksums
-            return;
-          }
+                pin = await showDialog<String>(
+                  context: Routerino.context, // ignore: use_build_context_synchronously
+                  builder: (_) => PinDialog(
+                    obscureText: true,
+                    showInvalidPin: !pinFirstAttempt,
+                  ),
+                );
 
-          // Also set for files whose hashing failed, so the progress bar stays
-          // consistent with the files that are left.
-          ref.notifier(fileTransferProvider).setProgress(sessionId: sessionId, fileId: id, progress: 1);
-          state = state.updateSession(
-            sessionId: sessionId,
-            state: (s) => s?.copyWith(hashedFileCount: s.hashedFileCount + 1),
-          );
-        }
-      } finally {
-        _hashCancelTokens.remove(sessionId);
-      }
-    }
+                pinFirstAttempt = false;
 
-    final hashedState = state[sessionId];
-    if (hashedState == null) {
-      // session has been canceled while calculating the checksums
-      return;
-    }
+                if (state[sessionId] == null) {
+                  // session has been canceled while the dialog was open
+                  return;
+                }
 
-    final requestState = hashedState.copyWith(
-      files: hashedState.files.map(
-        (id, sendingFile) => MapEntry(id, sendingFile.copyWith(file: sendingFile.file.withHash(hashes[id]))),
-      ),
-    );
-    state = state.updateSession(
-      sessionId: sessionId,
-      state: (_) => requestState,
-    );
-
-    final originDevice = ref.read(deviceFullInfoProvider);
-    final requestDto = rust_model.PrepareUploadRequestDto(
-      info: rust_model.RegisterDto(
-        alias: originDevice.alias,
-        version: originDevice.version,
-        deviceModel: originDevice.deviceModel,
-        deviceType: originDevice.deviceType.toRust(),
-        token: originDevice.fingerprint,
-        port: originDevice.port,
-        protocol: originDevice.https ? rust_model.ProtocolType.https : rust_model.ProtocolType.http,
-        hasWebInterface: originDevice.download,
-      ),
-      files: {
-        for (final entry in requestState.files.entries) entry.key: entry.value.file.toRust(),
-      },
-    );
-
-    rust_http.PrepareUploadResult? response;
-    bool invalidPin;
-    bool pinFirstAttempt = true;
-
-    String? pin;
-    final prepareUploadCancelToken = rust_cancel.createCancellationToken();
-    _prepareUploadCancelTokens[sessionId] = prepareUploadCancelToken;
-    try {
-      do {
-        invalidPin = false;
-        try {
-          response = await client.prepareUpload(
-            protocol: target.getProtocolType(),
-            ip: target.ip!,
-            port: target.port,
-            payload: requestDto,
-            // The peer is already verified during the TLS handshake by the
-            // fingerprint the client is pinned to.
-            publicKey: null,
-            pin: pin,
-            cancelToken: prepareUploadCancelToken,
-          );
-          // Every answered request is reported: a failure observed in the
-          // meantime (e.g. while the PIN dialog was open) must be overwritten.
-          _reportOutbound(target);
-        } on rust_http.RsHttpClientError_StatusCode catch (e) {
-          // Declined, busy, wrong PIN, ...: the peer answered, so it was reached.
-          _reportOutbound(target);
-          switch (e.status) {
-            case 401:
-              invalidPin = true;
-
-              // wait until animation is finished
-              await sleepAsync(500);
-              if (state[sessionId] == null) {
-                // session has been canceled in the meantime
-                return;
-              }
-
-              pin = await showDialog<String>(
-                context: Routerino.context, // ignore: use_build_context_synchronously
-                builder: (_) => PinDialog(
-                  obscureText: true,
-                  showInvalidPin: !pinFirstAttempt,
-                ),
-              );
-
-              pinFirstAttempt = false;
-
-              if (state[sessionId] == null) {
-                // session has been canceled while the dialog was open
-                return;
-              }
-
-              if (pin == null) {
+                if (pin == null) {
+                  state = state.updateSession(
+                    sessionId: sessionId,
+                    state: (s) => s?.copyWith(
+                      status: SessionStatus.canceledBySender,
+                    ),
+                  );
+                  return;
+                }
+                break;
+              case 403:
                 state = state.updateSession(
                   sessionId: sessionId,
                   state: (s) => s?.copyWith(
-                    status: SessionStatus.canceledBySender,
+                    status: SessionStatus.declined,
                   ),
                 );
                 return;
-              }
-              break;
-            case 403:
-              state = state.updateSession(
-                sessionId: sessionId,
-                state: (s) => s?.copyWith(
-                  status: SessionStatus.declined,
-                ),
-              );
-              return;
-            case 409:
-              state = state.updateSession(
-                sessionId: sessionId,
-                state: (s) => s?.copyWith(
-                  status: SessionStatus.recipientBusy,
-                ),
-              );
-              return;
-            case 429:
-              state = state.updateSession(
-                sessionId: sessionId,
-                state: (s) => s?.copyWith(
-                  status: SessionStatus.tooManyAttempts,
-                ),
-              );
-              return;
-            default:
-              state = state.updateSession(
-                sessionId: sessionId,
-                state: (s) => s?.copyWith(
-                  status: SessionStatus.finishedWithErrors,
-                  errorMessage: e.humanErrorMessage,
-                ),
-              );
-              return;
+              case 409:
+                state = state.updateSession(
+                  sessionId: sessionId,
+                  state: (s) => s?.copyWith(
+                    status: SessionStatus.recipientBusy,
+                  ),
+                );
+                return;
+              case 429:
+                state = state.updateSession(
+                  sessionId: sessionId,
+                  state: (s) => s?.copyWith(
+                    status: SessionStatus.tooManyAttempts,
+                  ),
+                );
+                return;
+              default:
+                state = state.updateSession(
+                  sessionId: sessionId,
+                  state: (s) => s?.copyWith(
+                    status: SessionStatus.finishedWithErrors,
+                    errorMessage: e.humanErrorMessage,
+                  ),
+                );
+                return;
+            }
+          } catch (e) {
+            if (e is rust_http.RsHttpClientError_Unreachable) {
+              // Only a request without any response says that the address
+              // cannot be dialed; a canceled request does not.
+              _reportOutbound(target, error: e.field0);
+              ref.redux(nearbyDevicesProvider).dispatch(RemoveFoundDeviceAction(target.fingerprint));
+            } else if (e is rust_http.RsHttpClientError_Reqwest) {
+              // The peer answered, its response just could not be read.
+              _reportOutbound(target);
+            }
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(
+                status: SessionStatus.finishedWithErrors,
+                errorMessage: e.humanErrorMessage,
+              ),
+            );
+            return;
           }
+        } while (invalidPin);
+      } finally {
+        _prepareUploadCancelTokens.remove(sessionId);
+      }
+
+      if (response == null) {
+        return;
+      }
+
+      if (state[sessionId] == null) {
+        // The session has been canceled locally while the response was on its way,
+        // so the session the receiver just created must be canceled as well.
+        final remoteSessionId = response.response?.sessionId;
+        if (remoteSessionId != null) {
+          unawaited(_notifyReceiverCancel(target, remoteSessionId));
+        }
+        return;
+      }
+
+      final Map<String, String> fileMap;
+      if (response.statusCode == 204) {
+        // Nothing selected
+        // Interpret this as "Read and close"
+        fileMap = {};
+      } else {
+        try {
+          fileMap = response.response!.files;
+          final remoteSessionId = response.response!.sessionId;
+          state = state.updateSession(
+            sessionId: sessionId,
+            state: (s) => s?.copyWith(
+              remoteSessionId: remoteSessionId,
+            ),
+          );
         } catch (e) {
-          if (e is rust_http.RsHttpClientError_Unreachable) {
-            // Only a request without any response says that the address
-            // cannot be dialed; a canceled request does not.
-            _reportOutbound(target, error: e.field0);
-            ref.redux(nearbyDevicesProvider).dispatch(RemoveFoundDeviceAction(target.fingerprint));
-          } else if (e is rust_http.RsHttpClientError_Reqwest) {
-            // The peer answered, its response just could not be read.
-            _reportOutbound(target);
-          }
           state = state.updateSession(
             sessionId: sessionId,
             state: (s) => s?.copyWith(
@@ -378,140 +430,104 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
           );
           return;
         }
-      } while (invalidPin);
-    } finally {
-      _prepareUploadCancelTokens.remove(sessionId);
-    }
-
-    if (response == null) {
-      return;
-    }
-
-    if (state[sessionId] == null) {
-      // The session has been canceled locally while the response was on its way,
-      // so the session the receiver just created must be canceled as well.
-      final remoteSessionId = response.response?.sessionId;
-      if (remoteSessionId != null) {
-        unawaited(_notifyReceiverCancel(target, remoteSessionId));
       }
-      return;
-    }
 
-    final Map<String, String> fileMap;
-    if (response.statusCode == 204) {
-      // Nothing selected
-      // Interpret this as "Read and close"
-      fileMap = {};
-    } else {
-      try {
-        fileMap = response.response!.files;
-        final remoteSessionId = response.response!.sessionId;
+      if (fileMap.isEmpty) {
+        // receiver has nothing selected
         state = state.updateSession(
           sessionId: sessionId,
           state: (s) => s?.copyWith(
-            remoteSessionId: remoteSessionId,
+            status: SessionStatus.finished,
           ),
         );
-      } catch (e) {
-        state = state.updateSession(
-          sessionId: sessionId,
-          state: (s) => s?.copyWith(
-            status: SessionStatus.finishedWithErrors,
-            errorMessage: e.humanErrorMessage,
-          ),
-        );
+
+        if (state[sessionId]?.background == false) {
+          // Pop back to the existing HomePage instead of pushing a new one:
+          // a second HomePage attaches a second PageView to the shared PageController,
+          // and removing routes without animation orphans a hero in flight.
+          ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
+          ref.global.dispatch(NavigateAction.popUntilRoot());
+        }
+
+        closeSession(sessionId);
         return;
       }
-    }
 
-    if (fileMap.isEmpty) {
-      // receiver has nothing selected
-      state = state.updateSession(
+      final sendingFiles = {
+        for (final file in requestState.files.values)
+          file.file.id: fileMap.containsKey(file.file.id) ? file.copyWith(token: fileMap[file.file.id]) : file,
+      };
+
+      // Recreate the transfer state: the hash progress is no longer needed and must not be
+      // mistaken for upload progress, which starts at zero for every file.
+      final transferNotifier = ref.notifier(fileTransferProvider);
+      transferNotifier.removeSession(sessionId);
+      transferNotifier.setStatuses(
         sessionId: sessionId,
-        state: (s) => s?.copyWith(
-          status: SessionStatus.finished,
-        ),
+        statuses: {for (final file in sendingFiles.values) file.file.id: file.token != null ? FileStatus.queue : FileStatus.skipped},
       );
 
       if (state[sessionId]?.background == false) {
-        // Pop back to the existing HomePage instead of pushing a new one:
-        // a second HomePage attaches a second PageView to the shared PageController,
-        // and removing routes without animation orphans a hero in flight.
-        ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
-        ref.global.dispatch(NavigateAction.popUntilRoot());
+        final background = ref.read(settingsProvider).sendMode == SendMode.multiple;
+
+        unawaited(
+          // ignore: use_build_context_synchronously
+          Routerino.context
+              .pushAndRemoveUntil(
+                removeUntil: HomePage,
+                transition: RouterinoTransition.fade(),
+                // immediately is not possible: https://github.com/flutter/flutter/issues/121910
+                builder: () => ProgressPage(
+                  showAppBar: background,
+                  closeSessionOnClose: !background,
+                  sessionId: sessionId,
+                ),
+              )
+              .then((_) {
+                if (background) {
+                  // The page was popped (e.g. backing out mid-transfer), so the session
+                  // runs in background again and is removed silently on success.
+                  setBackground(sessionId, true);
+                }
+              }),
+        );
       }
 
-      closeSession(sessionId);
-      return;
-    }
-
-    final sendingFiles = {
-      for (final file in requestState.files.values)
-        file.file.id: fileMap.containsKey(file.file.id) ? file.copyWith(token: fileMap[file.file.id]) : file,
-    };
-
-    // Recreate the transfer state: the hash progress is no longer needed and must not be
-    // mistaken for upload progress, which starts at zero for every file.
-    final transferNotifier = ref.notifier(fileTransferProvider);
-    transferNotifier.removeSession(sessionId);
-    transferNotifier.setStatuses(
-      sessionId: sessionId,
-      statuses: {for (final file in sendingFiles.values) file.file.id: file.token != null ? FileStatus.queue : FileStatus.skipped},
-    );
-
-    if (state[sessionId]?.background == false) {
-      final background = ref.read(settingsProvider).sendMode == SendMode.multiple;
-
-      unawaited(
-        // ignore: use_build_context_synchronously
-        Routerino.context
-            .pushAndRemoveUntil(
-              removeUntil: HomePage,
-              transition: RouterinoTransition.fade(),
-              // immediately is not possible: https://github.com/flutter/flutter/issues/121910
-              builder: () => ProgressPage(
-                showAppBar: background,
-                closeSessionOnClose: !background,
-                sessionId: sessionId,
-              ),
-            )
-            .then((_) {
-              if (background) {
-                // The page was popped (e.g. backing out mid-transfer), so the session
-                // runs in background again and is removed silently on success.
-                setBackground(sessionId, true);
-              }
-            }),
-      );
-    }
-
-    state = state.updateSession(
-      sessionId: sessionId,
-      state: (s) => s?.copyWith(
-        status: SessionStatus.sending,
-        files: sendingFiles,
-      ),
-    );
-
-    // Keep the process alive for the whole transfer. Started here, while the app is still in the
-    // foreground, because Android 12+ rejects starting a foreground service from the background.
-    TransferNotification.start(sessionId: sessionId, receiving: false);
-
-    if (checkPlatform([TargetPlatform.android])) {
-      final totalBytes = sendingFiles.values.where((f) => f.token != null).fold<int>(0, (sum, f) => sum + f.file.size);
-      _lastAndroidProgressNotif = DateTime.now();
-      unawaited(
-        showTransferProgressNotificationAndroid(
-          title: 'Sending to ${target.alias} · 0%',
-          body: '0 B / ${totalBytes.asReadableFileSize}',
-          progress: 0,
-          max: 100,
-          indeterminate: totalBytes == 0,
+      state = state.updateSession(
+        sessionId: sessionId,
+        state: (s) => s?.copyWith(
+          status: SessionStatus.sending,
+          files: sendingFiles,
         ),
       );
-    }
 
-    await _sendLoop(sessionId, sendingFiles);
+      // Keep the process alive for the whole transfer. Started here on non-Android;
+      // Android starts it before any await so background handoff still keeps it alive.
+      if (!checkPlatform([TargetPlatform.android])) {
+        TransferNotification.start(sessionId: sessionId, receiving: false);
+      }
+
+      if (checkPlatform([TargetPlatform.android])) {
+        final totalBytes = sendingFiles.values.where((f) => f.token != null).fold<int>(0, (sum, f) => sum + f.file.size);
+        _lastAndroidProgressNotif = DateTime.now();
+        unawaited(
+          showTransferProgressNotificationAndroid(
+            title: 'Sending to ${target.alias} · 0%',
+            body: '0 B / ${totalBytes.asReadableFileSize}',
+            progress: 0,
+            max: 100,
+            indeterminate: totalBytes == 0,
+          ),
+        );
+      }
+
+      handedToSendLoop = true;
+      await _sendLoop(sessionId, sendingFiles);
+    } finally {
+      if (!handedToSendLoop) {
+        TransferNotification.stop(sessionId);
+      }
+    }
   }
 
   /// Tells the discovery whether [target] could be reached at the address it

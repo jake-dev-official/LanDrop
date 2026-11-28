@@ -90,6 +90,10 @@ final androidShareAutoCloseProvider = NotifierProvider<AndroidShareAutoCloseNoti
 bool _discoveryListenerStarted = false;
 bool _androidCancelHandlerRegistered = false;
 bool _cacheClearedOnce = false;
+Future<void>? _isolatesReadyFuture;
+
+/// Resolves once background isolates have finished spawning.
+Future<void> ensureIsolatesReady() => _isolatesReadyFuture ?? Future<void>.value();
 
 /// Will be called before the MaterialApp started
 Future<RefenaContainer> preInit(List<String> args) async {
@@ -112,7 +116,13 @@ Future<RefenaContainer> preInit(List<String> args) async {
 
   MapperContainer.globals.use(const FileDtoMapper());
 
-  await initRustLib();
+  final rustFuture = initRustLib();
+  final persistenceFuture = PersistenceService.initialize(supportsDynamicColors: false);
+  final i18nFuture = initI18n();
+  final deviceInfoFuture = getDeviceInfo();
+  final tvFuture = checkIfTv();
+
+  await rustFuture;
 
   if (kDebugMode) {
     try {
@@ -122,18 +132,14 @@ Future<RefenaContainer> preInit(List<String> args) async {
     }
   }
 
-  final dynamicColors = await getDynamicColors();
-
-  final persistenceService = await PersistenceService.initialize(
-    supportsDynamicColors: dynamicColors != null,
-  );
+  final persistenceService = await persistenceFuture;
 
   if (defaultTargetPlatform == TargetPlatform.windows) {
     // Remove legacy SendTo shortcut; LanDrop uses the Windows 11 shell extension.
     await disableContextMenu();
   }
 
-  await initI18n();
+  await i18nFuture;
 
   TransferNotification.init(notificationStrings);
 
@@ -186,14 +192,17 @@ Future<RefenaContainer> preInit(List<String> args) async {
 
   setDefaultRouteTransition();
 
+  final deviceRawInfo = await deviceInfoFuture;
+  final isTv = await tvFuture;
+
   final container = RefenaContainer(
     observers: kDebugMode ? [CustomRefenaObserver()] : [ReleaseNoopRefenaObserver()],
     overrides: [
       persistenceProvider.overrideWithValue(persistenceService),
-      deviceRawInfoProvider.overrideWithValue(await getDeviceInfo()),
+      deviceRawInfoProvider.overrideWithValue(deviceRawInfo),
       appArgumentsProvider.overrideWithValue(args),
-      tvProvider.overrideWithValue(await checkIfTv()),
-      dynamicColorsProvider.overrideWithValue(dynamicColors),
+      tvProvider.overrideWithValue(isTv),
+      dynamicColorsProvider.overrideWithValue(null),
       sleepProvider.overrideWithInitialState((ref) => startHidden),
     ],
     platformHint: RefenaScope.getPlatformHint(), // help Refena know the correct platform
@@ -234,8 +243,6 @@ Future<RefenaContainer> preInit(List<String> args) async {
     }
   }
 
-  await container.redux(parentIsolateProvider).dispatchAsync(IsolateSetupAction());
-
   if (checkPlatform([TargetPlatform.android])) {
     if (!_androidCancelHandlerRegistered) {
       _androidCancelHandlerRegistered = true;
@@ -255,29 +262,37 @@ Future<RefenaContainer> preInit(List<String> args) async {
       });
     }
 
-    try {
-      await container.notifier(serverProvider).startServerFromSettings();
-    } catch (e) {
-      _logger.warning('Headless Android server start failed', e);
-    }
-
-    if (container.read(settingsProvider).backgroundKeepAlive) {
-      TransferNotification.setKeepAlive(
-        enabled: true,
-        channelName: 'LanDrop Background',
-        idleTitle: 'LanDrop ready',
-        idleText: 'Listening on local network',
-      );
-    }
-
-    if (!_discoveryListenerStarted) {
-      _discoveryListenerStarted = true;
+    Future<void> bootstrapAndroid() async {
+      await container.redux(parentIsolateProvider).dispatchAsync(IsolateSetupAction());
       try {
-        container.redux(nearbyDevicesProvider).dispatchAsync(StartDiscoveryListener()); // ignore: unawaited_futures
+        await container.notifier(serverProvider).startServerFromSettings();
       } catch (e) {
-        _logger.warning('Starting discovery listener failed', e);
+        _logger.warning('Headless Android server start failed', e);
+      }
+
+      if (container.read(settingsProvider).backgroundKeepAlive) {
+        TransferNotification.setKeepAlive(
+          enabled: true,
+          channelName: 'LanDrop Background',
+          idleTitle: 'LanDrop ready',
+          idleText: 'Listening on local network',
+        );
+      }
+
+      if (!_discoveryListenerStarted) {
+        _discoveryListenerStarted = true;
+        try {
+          unawaited(container.redux(nearbyDevicesProvider).dispatchAsync(StartDiscoveryListener()));
+        } catch (e) {
+          _logger.warning('Starting discovery listener failed', e);
+        }
       }
     }
+
+    _isolatesReadyFuture = bootstrapAndroid();
+  } else {
+    _isolatesReadyFuture = container.redux(parentIsolateProvider).dispatchAsync(IsolateSetupAction());
+    await _isolatesReadyFuture;
   }
 
   return container;
@@ -289,15 +304,50 @@ StreamSubscription? _sharedMediaSubscription;
 Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
   await updateSystemOverlayStyle(context);
 
+  bool hasInitialShare = false;
+
+  if (checkPlatformCanReceiveShareIntent()) {
+    final shareHandler = ShareHandlerPlatform.instance;
+
+    if (appStart) {
+      final initialSharedPayload = await shareHandler.getInitialSharedMedia();
+      if (initialSharedPayload != null) {
+        hasInitialShare = true;
+        // ignore: unawaited_futures
+        ref.global.dispatchAsync(
+          _HandleShareIntentAction(
+            payload: initialSharedPayload,
+          ),
+        );
+      }
+    }
+
+    _sharedMediaSubscription?.cancel(); // ignore: unawaited_futures
+    _sharedMediaSubscription = shareHandler.sharedMediaStream.listen((SharedMedia payload) async {
+      hasInitialShare = true;
+      await ref.global.dispatchAsync(
+        _HandleShareIntentAction(
+          payload: payload,
+        ),
+      );
+    });
+
+    if (checkPlatform([TargetPlatform.android])) {
+      // Both messages above travel through the same messenger in order, so the stream is
+      // guaranteed to be attached natively before MainActivity replays held-back intents.
+      await flushPendingShareIntentsAndroid();
+    }
+  }
+
   if (checkPlatform([TargetPlatform.android])) {
     // On some TVs, requesting a high refresh rate can trigger HDMI resync and blank the display when entering or leaving the app.
     // https://github.com/localsend/localsend/issues/3452
     if (!ref.read(tvProvider)) {
-      try {
-        await FlutterDisplayMode.setHighRefreshRate();
-      } catch (e) {
-        _logger.warning('Setting high refresh rate failed', e);
-      }
+      unawaited(
+        FlutterDisplayMode.setHighRefreshRate().catchError((Object e) {
+          _logger.warning('Setting high refresh rate failed', e);
+        }),
+      );
     }
 
     // Android 17+ blocks multicast discovery and LAN connections until this permission is granted,
@@ -311,11 +361,15 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
     }
   }
 
-  try {
-    await ref.notifier(serverProvider).startServerFromSettings();
-  } catch (e) {
-    if (context.mounted) {
-      context.showSnackBar(e.toString());
+  await ensureIsolatesReady();
+
+  if (ref.read(serverProvider) == null) {
+    try {
+      await ref.notifier(serverProvider).startServerFromSettings();
+    } catch (e) {
+      if (context.mounted) {
+        context.showSnackBar(e.toString());
+      }
     }
   }
 
@@ -387,41 +441,6 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
           args: args,
         ),
       );
-    }
-  }
-
-  bool hasInitialShare = false;
-
-  if (checkPlatformCanReceiveShareIntent()) {
-    final shareHandler = ShareHandlerPlatform.instance;
-
-    if (appStart) {
-      final initialSharedPayload = await shareHandler.getInitialSharedMedia();
-      if (initialSharedPayload != null) {
-        hasInitialShare = true;
-        // ignore: unawaited_futures
-        ref.global.dispatchAsync(
-          _HandleShareIntentAction(
-            payload: initialSharedPayload,
-          ),
-        );
-      }
-    }
-
-    _sharedMediaSubscription?.cancel(); // ignore: unawaited_futures
-    _sharedMediaSubscription = shareHandler.sharedMediaStream.listen((SharedMedia payload) async {
-      hasInitialShare = true;
-      await ref.global.dispatchAsync(
-        _HandleShareIntentAction(
-          payload: payload,
-        ),
-      );
-    });
-
-    if (checkPlatform([TargetPlatform.android])) {
-      // Both messages above travel through the same messenger in order, so the stream is
-      // guaranteed to be attached natively before MainActivity replays held-back intents.
-      await flushPendingShareIntentsAndroid();
     }
   }
 
@@ -499,6 +518,7 @@ class _HandleShareIntentAction extends AsyncGlobalAction {
         ];
 
         if (incomingFiles.isNotEmpty) {
+          await ensureIsolatesReady();
           final target = await resolveTargetDeviceByFingerprint(ref, directFp);
           if (target != null) {
             ref.notifier(androidShareAutoCloseProvider).set(false);
