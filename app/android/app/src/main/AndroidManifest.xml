@@ -60,7 +60,21 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
 
-            <!-- localsend: Receive share intent (share_handler) -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
+        </activity>
+
+        <activity
+            android:name=".DirectShareActivity"
+            android:label="LanDrop"
+            android:icon="@mipmap/ic_launcher"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -71,20 +85,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-
-            <meta-data
-                android:name="android.app.shortcuts"
-                android:resource="@xml/shortcuts" />
-
         </activity>
-
-        <activity
-            android:name=".DirectShareActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true"
-            android:noHistory="true"
-            android:taskAffinity="" />
 
         <!-- Quick tile to launch the app -->
         <service
