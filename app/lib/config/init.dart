@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show utf8;
 
 import 'package:dart_mappable/dart_mappable.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:localsend_app/config/refena.dart';
 import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/assets.gen.dart';
+import 'package:localsend_app/model/cross_file.dart';
 import 'package:localsend_app/pages/changelog_page.dart';
 import 'package:localsend_app/pages/home_page.dart';
 import 'package:localsend_app/pages/home_page_controller.dart';
@@ -33,6 +35,7 @@ import 'package:localsend_app/provider/version_provider.dart';
 import 'package:localsend_app/provider/window_dimensions_provider.dart';
 import 'package:localsend_app/util/changelog.dart';
 import 'package:localsend_app/util/i18n.dart';
+import 'package:localsend_app/util/native/android_share_shortcuts.dart';
 import 'package:localsend_app/util/native/autostart_helper.dart';
 import 'package:localsend_app/util/native/cache_helper.dart';
 import 'package:localsend_app/util/native/channel/android_channel.dart';
@@ -53,6 +56,7 @@ import 'package:localsend_app/widget/dialogs/whats_new_dialog.dart';
 import 'package:localsend_isolates/isolate.dart';
 import 'package:localsend_isolates/model/dto/file_dto.dart';
 import 'package:localsend_isolates/model/dto/multicast_dto.dart';
+import 'package:localsend_isolates/model/file_type.dart';
 import 'package:localsend_isolates/model/session_status.dart';
 import 'package:localsend_isolates/rust/api/logging.dart' as rust_logging;
 import 'package:localsend_isolates/util/logger.dart';
@@ -65,9 +69,24 @@ import 'package:refena_flutter/addons.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
 import 'package:share_handler/share_handler.dart';
+import 'package:uuid/uuid.dart';
 import 'package:window_manager/window_manager.dart';
 
 final _logger = Logger('Init');
+const _shareUuid = Uuid();
+
+class AndroidShareAutoCloseNotifier extends Notifier<bool> {
+  @override
+  bool init() => false;
+
+  void set(bool value) => state = value;
+}
+
+/// True when the current file selection came from an Android Share intent
+/// so tapping a device auto-returns to the previous app once sending starts.
+final androidShareAutoCloseProvider = NotifierProvider<AndroidShareAutoCloseNotifier, bool>(
+  (ref) => AndroidShareAutoCloseNotifier(),
+);
 bool _discoveryListenerStarted = false;
 bool _androidCancelHandlerRegistered = false;
 bool _cacheClearedOnce = false;
@@ -317,6 +336,14 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
         knownDevices: ref.read(knownDevicesProvider),
       ),
     );
+  } else if (checkPlatform([TargetPlatform.android])) {
+    unawaited(
+      syncAndroidShareShortcuts(
+        favorites: ref.read(favoritesProvider),
+        nearbyDevices: ref.read(nearbyDevicesProvider).devices,
+        knownDevices: ref.read(knownDevicesProvider),
+      ),
+    );
   }
 
   if (!_discoveryListenerStarted) {
@@ -447,6 +474,48 @@ class _HandleShareIntentAction extends AsyncGlobalAction {
   @override
   Future<void> reduce() async {
     final message = payload.content;
+    final attachments = payload.attachments?.where((a) => a != null).cast<SharedAttachment>().toList() ?? const <SharedAttachment>[];
+
+    if (checkPlatform([TargetPlatform.android])) {
+      final directFp = await consumeDirectShareTargetAndroid();
+      if (directFp != null && directFp.isNotEmpty) {
+        final incomingFiles = <CrossFile>[
+          if (message != null && message.trim().isNotEmpty)
+            () {
+              final bytes = utf8.encode(message);
+              return CrossFile(
+                name: '${_shareUuid.v4()}.txt',
+                fileType: FileType.text,
+                size: bytes.length,
+                thumbnail: null,
+                asset: null,
+                path: null,
+                bytes: bytes,
+                lastModified: null,
+                lastAccessed: null,
+              );
+            }(),
+          for (final attachment in attachments) await CrossFileConverters.convertSharedAttachment(attachment),
+        ];
+
+        if (incomingFiles.isNotEmpty) {
+          final target = await resolveTargetDeviceByFingerprint(ref, directFp);
+          if (target != null) {
+            ref.notifier(androidShareAutoCloseProvider).set(false);
+            await ref
+                .notifier(pendingSendProvider)
+                .enqueue(
+                  target: target,
+                  files: incomingFiles,
+                  background: true,
+                );
+            await moveTaskToBackAndroid();
+            return;
+          }
+        }
+      }
+    }
+
     if (message != null && message.trim().isNotEmpty) {
       ref.redux(selectedSendingFilesProvider).dispatch(AddMessageAction(message: message));
     }
@@ -454,11 +523,14 @@ class _HandleShareIntentAction extends AsyncGlobalAction {
         .redux(selectedSendingFilesProvider)
         .dispatchAsync(
           AddFilesAction(
-            files: payload.attachments?.where((a) => a != null).cast<SharedAttachment>() ?? <SharedAttachment>[],
+            files: attachments,
             converter: CrossFileConverters.convertSharedAttachment,
           ),
         );
 
+    if (checkPlatform([TargetPlatform.android]) && ref.read(selectedSendingFilesProvider).isNotEmpty) {
+      ref.notifier(androidShareAutoCloseProvider).set(true);
+    }
     ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
   }
 }

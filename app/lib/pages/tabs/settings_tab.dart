@@ -175,7 +175,14 @@ class SettingsTab extends StatelessWidget {
                         if (preset == 'custom') {
                           String? customPath = vm.settings.customSoundPath;
                           if (customPath == null || customPath.isEmpty) {
-                            customPath = await pickAndSaveCustomSoundFile();
+                            try {
+                              customPath = await pickAndSaveCustomSoundFile();
+                            } on FormatException catch (e) {
+                              if (context.mounted) {
+                                context.showSnackBar(e.message);
+                              }
+                              return;
+                            }
                             if (customPath == null) {
                               return;
                             }
@@ -206,7 +213,15 @@ class SettingsTab extends StatelessWidget {
                     label: 'Custom sound file',
                     buttonLabel: (vm.settings.customSoundPath?.isNotEmpty ?? false) ? p.basename(vm.settings.customSoundPath!) : 'Choose file',
                     onTap: () async {
-                      final picked = await pickAndSaveCustomSoundFile();
+                      final String? picked;
+                      try {
+                        picked = await pickAndSaveCustomSoundFile();
+                      } on FormatException catch (e) {
+                        if (context.mounted) {
+                          context.showSnackBar(e.message);
+                        }
+                        return;
+                      }
                       if (picked == null) {
                         return;
                       }

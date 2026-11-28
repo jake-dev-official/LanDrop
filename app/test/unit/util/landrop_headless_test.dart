@@ -1,6 +1,9 @@
+import 'dart:typed_data';
+
 import 'package:localsend_app/config/refena.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/persistence/known_device.dart';
+import 'package:localsend_app/util/native/android_share_shortcuts.dart';
 import 'package:localsend_app/util/native/completion_sound_helper.dart';
 import 'package:localsend_app/util/native/headless_send_helper.dart';
 import 'package:localsend_app/util/native/windows_device_cache.dart';
@@ -153,26 +156,135 @@ void main() {
   });
 
   group('transfer sounds', () {
-    test('resolveTransferSoundAsset maps start and done sounds for all presets', () {
-      expect(resolveTransferSoundAsset(preset: 'default', isStart: true), 'assets/sound/pop_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'default', isStart: false), 'assets/sound/default.wav');
-      expect(resolveTransferSoundAsset(preset: 'pop', isStart: true), 'assets/sound/pop_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'pop', isStart: false), 'assets/sound/pop.wav');
-      expect(resolveTransferSoundAsset(preset: 'blip', isStart: true), 'assets/sound/blip_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'blip', isStart: false), 'assets/sound/blip_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'chime', isStart: true), 'assets/sound/chime_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'chime', isStart: false), 'assets/sound/chime_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'ding', isStart: true), 'assets/sound/ding_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'ding', isStart: false), 'assets/sound/ding_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'unknown', isStart: true), 'assets/sound/pop_start.wav');
-      expect(resolveTransferSoundAsset(preset: 'unknown', isStart: false), 'assets/sound/default.wav');
+    test('resolveTransferSoundAsset maps defaults and presets cleanly', () {
+      expect(resolveTransferSoundAsset(preset: 'default'), 'assets/sound/marimba_lite.wav');
+      expect(resolveTransferSoundAsset(preset: 'classic'), 'assets/sound/default.wav');
+      expect(resolveTransferSoundAsset(preset: 'pop'), 'assets/sound/pop.wav');
+      expect(resolveTransferSoundAsset(preset: 'blip'), 'assets/sound/blip_done.wav');
+      expect(resolveTransferSoundAsset(preset: 'chime'), 'assets/sound/chime_done.wav');
+      expect(resolveTransferSoundAsset(preset: 'ding'), 'assets/sound/ding_done.wav');
+      expect(resolveTransferSoundAsset(preset: 'unknown'), 'assets/sound/marimba_lite.wav');
     });
 
     test('transferSoundPresetLabel returns readable labels', () {
       expect(
         transferSoundPresets.map(transferSoundPresetLabel).toList(),
-        ['Default', 'Pop', 'Blip', 'Chime', 'Ding', 'Custom file'],
+        ['Default', 'Classic', 'Pop', 'Blip', 'Chime', 'Ding', 'Custom file'],
       );
+    });
+
+    test('estimateWavDurationSeconds computes WAV length and ignores non-WAV bytes', () {
+      Uint8List buildWav({required int byteRate, required int dataSize}) {
+        final bytes = Uint8List(44);
+        final bd = ByteData.sublistView(bytes);
+        bytes.setAll(0, 'RIFF'.codeUnits);
+        bd.setUint32(4, 36 + dataSize, Endian.little);
+        bytes.setAll(8, 'WAVE'.codeUnits);
+        bytes.setAll(12, 'fmt '.codeUnits);
+        bd.setUint32(16, 16, Endian.little);
+        bd.setUint16(20, 1, Endian.little); // PCM
+        bd.setUint16(22, 2, Endian.little); // stereo
+        bd.setUint32(24, 44100, Endian.little);
+        bd.setUint32(28, byteRate, Endian.little);
+        bd.setUint16(32, 4, Endian.little);
+        bd.setUint16(34, 16, Endian.little);
+        bytes.setAll(36, 'data'.codeUnits);
+        bd.setUint32(40, dataSize, Endian.little);
+        return bytes;
+      }
+
+      // 44100 Hz stereo 16-bit = 176400 B/s; 2.5s = 441000 bytes
+      expect(estimateWavDurationSeconds(buildWav(byteRate: 176400, dataSize: 441000)), closeTo(2.5, 0.001));
+      // 6.0s > 5s cap
+      expect(estimateWavDurationSeconds(buildWav(byteRate: 176400, dataSize: 1058400)), closeTo(6.0, 0.001));
+      expect(estimateWavDurationSeconds(Uint8List.fromList([1, 2, 3, 4])), isNull);
+    });
+  });
+
+  group('buildAndroidShareShortcutsPayload', () {
+    test('ranks online favorites first, deduplicates, and caps at maxCount', () {
+      final favorites = [
+        const FavoriteDevice(
+          id: '1',
+          fingerprint: 'FP_FAV_OFFLINE',
+          ip: '192.168.1.50',
+          port: 53317,
+          alias: 'Work PC',
+          customAlias: true,
+        ),
+        const FavoriteDevice(
+          id: '2',
+          fingerprint: 'FP_FAV_ONLINE',
+          ip: '192.168.1.10',
+          port: 53317,
+          alias: 'JAKE PC',
+          customAlias: true,
+        ),
+      ];
+      final nearby = <String, Device>{
+        'FP_FAV_ONLINE': const Device(
+          signalingId: null,
+          ip: '192.168.1.10',
+          version: '2.2',
+          port: 53317,
+          https: true,
+          fingerprint: 'FP_FAV_ONLINE',
+          alias: 'DESKTOP',
+          deviceModel: 'Windows',
+          deviceType: DeviceType.desktop,
+          download: false,
+          channels: [],
+        ),
+        'FP_ONLINE_OTHER': const Device(
+          signalingId: null,
+          ip: '192.168.1.20',
+          version: '2.2',
+          port: 53317,
+          https: true,
+          fingerprint: 'FP_ONLINE_OTHER',
+          alias: 'Laptop',
+          deviceModel: 'Laptop',
+          deviceType: DeviceType.desktop,
+          download: false,
+          channels: [],
+        ),
+      };
+      final knownDevices = [
+        const KnownDevice(
+          fingerprint: 'FP_KNOWN_1',
+          alias: 'Alpha Tablet',
+          ip: '192.168.1.60',
+          port: 53317,
+          https: true,
+          deviceType: DeviceType.mobile,
+          lastSeenMs: 1700000000000,
+        ),
+        const KnownDevice(
+          fingerprint: 'FP_KNOWN_2',
+          alias: 'Beta Phone',
+          ip: '192.168.1.61',
+          port: 53317,
+          https: true,
+          deviceType: DeviceType.mobile,
+          lastSeenMs: 1700000000000,
+        ),
+      ];
+
+      final payload = buildAndroidShareShortcutsPayload(
+        favorites: favorites,
+        nearbyDevices: nearby,
+        knownDevices: knownDevices,
+        maxCount: 4,
+      );
+
+      expect(payload.map((e) => e['fingerprint']).toList(), [
+        'FP_FAV_ONLINE',
+        'FP_ONLINE_OTHER',
+        'FP_FAV_OFFLINE',
+        'FP_KNOWN_1',
+      ]);
+      expect(payload.first['alias'], 'JAKE PC');
+      expect(payload.first['deviceType'], 'desktop');
     });
   });
 

@@ -1,3 +1,4 @@
+import 'dart:convert' show ascii;
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -11,10 +12,11 @@ import 'package:path_provider/path_provider.dart' as path_provider;
 
 final _logger = Logger('CompletionSound');
 const _windowsChannel = MethodChannel('org.localsend.localsend_app/landrop_windows');
-const transferSoundPresets = ['default', 'pop', 'blip', 'chime', 'ding', 'custom'];
+const transferSoundPresets = ['default', 'classic', 'pop', 'blip', 'chime', 'ding', 'custom'];
+const maxCustomSoundBytes = 2 * 1024 * 1024; // 2 MB
+const maxCustomSoundDurationSeconds = 5.0;
 
 final Map<String, String> _cachedAssetPaths = {};
-DateTime? _lastStartSoundAt;
 int _soundEpoch = 0;
 
 void cancelPendingFinishSound() {
@@ -25,6 +27,8 @@ String transferSoundPresetLabel(String preset) {
   switch (preset) {
     case 'default':
       return 'Default';
+    case 'classic':
+      return 'Classic';
     case 'pop':
       return 'Pop';
     case 'blip':
@@ -42,33 +46,64 @@ String transferSoundPresetLabel(String preset) {
 
 String resolveTransferSoundAsset({
   required String preset,
-  required bool isStart,
+  bool isStart = false,
 }) {
   switch (preset) {
+    case 'classic':
+      return 'assets/sound/default.wav';
     case 'pop':
-      return isStart ? 'assets/sound/pop_start.wav' : 'assets/sound/pop.wav';
+      return 'assets/sound/pop.wav';
     case 'blip':
-      return isStart ? 'assets/sound/blip_start.wav' : 'assets/sound/blip_done.wav';
+      return 'assets/sound/blip_done.wav';
     case 'chime':
-      return isStart ? 'assets/sound/chime_start.wav' : 'assets/sound/chime_done.wav';
+      return 'assets/sound/chime_done.wav';
     case 'ding':
-      return isStart ? 'assets/sound/ding_start.wav' : 'assets/sound/ding_done.wav';
+      return 'assets/sound/ding_done.wav';
     case 'default':
     default:
-      return isStart ? 'assets/sound/pop_start.wav' : 'assets/sound/default.wav';
+      return 'assets/sound/marimba_lite.wav';
   }
 }
 
-Future<void> playTransferStartSound({
-  required String preset,
-  String? customPath,
-}) async {
-  _lastStartSoundAt = DateTime.now();
-  await _playConfiguredSound(
-    preset: preset,
-    customPath: customPath,
-    isStart: true,
-  );
+/// Returns the duration in seconds for a PCM/RIFF `.wav` byte buffer, or `null` if unknown.
+double? estimateWavDurationSeconds(Uint8List bytes) {
+  if (bytes.length < 44) {
+    return null;
+  }
+  if (ascii.decode(bytes.sublist(0, 4), allowInvalid: true) != 'RIFF' || ascii.decode(bytes.sublist(8, 12), allowInvalid: true) != 'WAVE') {
+    return null;
+  }
+
+  final data = ByteData.sublistView(bytes);
+  int offset = 12;
+  int? byteRate;
+  int? dataSize;
+
+  while (offset + 8 <= bytes.length) {
+    final chunkId = ascii.decode(bytes.sublist(offset, offset + 4), allowInvalid: true);
+    final chunkSize = data.getUint32(offset + 4, Endian.little);
+    final payloadOffset = offset + 8;
+
+    if (chunkId == 'fmt ' && chunkSize >= 16 && payloadOffset + 12 <= bytes.length) {
+      byteRate = data.getUint32(payloadOffset + 8, Endian.little);
+    } else if (chunkId == 'data') {
+      dataSize = chunkSize;
+      if (byteRate != null && byteRate > 0) {
+        return dataSize / byteRate;
+      }
+    }
+
+    final step = 8 + chunkSize + (chunkSize.isOdd ? 1 : 0);
+    if (step <= 8) {
+      break;
+    }
+    offset += step;
+  }
+
+  if (byteRate != null && byteRate > 0 && dataSize != null) {
+    return dataSize / byteRate;
+  }
+  return null;
 }
 
 Future<void> playTransferFinishSound({
@@ -77,23 +112,16 @@ Future<void> playTransferFinishSound({
   bool respectStartGap = true,
 }) async {
   final epoch = _soundEpoch;
-  if (respectStartGap && _lastStartSoundAt != null) {
-    final elapsedMs = DateTime.now().difference(_lastStartSoundAt!).inMilliseconds;
-    if (elapsedMs < 320) {
-      await Future.delayed(Duration(milliseconds: 320 - elapsedMs));
-    }
-  }
   if (epoch != _soundEpoch) {
     return;
   }
   await _playConfiguredSound(
     preset: preset,
     customPath: customPath,
-    isStart: false,
   );
 }
 
-/// Extracts the bundled pop sound lazily and plays it natively without extra packages.
+/// Extracts the bundled sound lazily and plays it natively without extra packages.
 Future<void> playCompletionSound() async {
   await playTransferFinishSound(preset: 'default', respectStartGap: false);
 }
@@ -119,8 +147,19 @@ Future<String?> pickAndSaveCustomSoundFile() async {
   }
 
   final bytes = await picked.readAsBytes();
+  if (bytes.length > maxCustomSoundBytes) {
+    throw const FormatException('Custom sound must be 2 MB or smaller');
+  }
+
   final rawExt = p.extension(picked.name).replaceFirst('.', '').toLowerCase();
   final ext = rawExt.isEmpty ? 'wav' : rawExt;
+  if (ext == 'wav') {
+    final duration = estimateWavDurationSeconds(bytes);
+    if (duration != null && duration > maxCustomSoundDurationSeconds) {
+      throw const FormatException('Custom sound must be 5 seconds or shorter');
+    }
+  }
+
   final dir = await path_provider.getApplicationSupportDirectory();
   await dir.create(recursive: true);
   final destFile = File(p.join(dir.path, 'landrop_custom_sound.$ext'));
@@ -131,7 +170,6 @@ Future<String?> pickAndSaveCustomSoundFile() async {
 Future<void> _playConfiguredSound({
   required String preset,
   required String? customPath,
-  required bool isStart,
 }) async {
   try {
     String? path;
@@ -142,7 +180,7 @@ Future<void> _playConfiguredSound({
       }
     }
     path ??= await _ensureAssetSoundFile(
-      resolveTransferSoundAsset(preset: preset, isStart: isStart),
+      resolveTransferSoundAsset(preset: preset),
     );
     if (path == null) {
       return;

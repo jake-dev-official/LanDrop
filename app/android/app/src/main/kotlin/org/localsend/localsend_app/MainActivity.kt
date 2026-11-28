@@ -2,6 +2,7 @@ package org.localsend.localsend_app
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 
@@ -14,6 +15,7 @@ class MainActivity : FlutterActivity() {
     private val pendingShareIntents = mutableListOf<Intent>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        captureDirectShareTarget(intent)
         LanDropEngineManager.ensureEngine(applicationContext)
         LanDropEngineManager.attachActivity(this)
         super.onCreate(savedInstanceState)
@@ -35,6 +37,7 @@ class MainActivity : FlutterActivity() {
             pendingShareIntents.add(intent)
             return
         }
+        captureDirectShareTarget(intent)
         super.onNewIntent(intent)
     }
 
@@ -42,8 +45,26 @@ class MainActivity : FlutterActivity() {
         val pending = pendingShareIntents.toList()
         pendingShareIntents.clear()
         for (intent in pending) {
+            captureDirectShareTarget(intent)
             super.onNewIntent(intent)
         }
+    }
+
+    private fun captureDirectShareTarget(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE) {
+            return
+        }
+        val shortcutId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID)
+        } else {
+            null
+        }
+        LanDropEngineManager.pendingDirectShareFingerprint =
+            if (shortcutId != null && shortcutId.startsWith(LanDropEngineManager.SHORTCUT_ID_PREFIX)) {
+                shortcutId.removePrefix(LanDropEngineManager.SHORTCUT_ID_PREFIX)
+            } else {
+                null
+            }
     }
 
     // Overriding the static methods we need from the Java class, as described

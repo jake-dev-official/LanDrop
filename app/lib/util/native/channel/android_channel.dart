@@ -93,6 +93,36 @@ Future<void> flushPendingShareIntentsAndroid() async {
   }
 }
 
+/// Returns and clears the target device fingerprint if launched via an Android Direct Share shortcut.
+Future<String?> consumeDirectShareTargetAndroid() async {
+  try {
+    return await _methodChannel.invokeMethod<String>('consumeDirectShareTarget');
+  } catch (e) {
+    _logger.warning('Could not read direct share target', e);
+    return null;
+  }
+}
+
+/// Sends the Android activity to the background so the user returns to their previous app.
+Future<void> moveTaskToBackAndroid() async {
+  try {
+    await _methodChannel.invokeMethod('moveTaskToBack');
+  } catch (e) {
+    _logger.warning('Could not move task to back', e);
+  }
+}
+
+/// Publishes dynamic Direct Share shortcuts for known/online devices on Android.
+Future<void> updateShareShortcutsAndroid(List<Map<String, dynamic>> devices) async {
+  try {
+    await _methodChannel.invokeMethod('updateShareShortcuts', {
+      'devices': devices,
+    });
+  } catch (e) {
+    _logger.warning('Could not update Android share shortcuts', e);
+  }
+}
+
 Future<void> openGallery() async {
   _logger.info('Opening gallery');
   await _methodChannel.invokeMethod('openGallery');

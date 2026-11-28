@@ -7,6 +7,7 @@ import 'package:localsend_app/provider/favorites_provider.dart';
 import 'package:localsend_app/provider/known_devices_provider.dart';
 import 'package:localsend_app/provider/logging/discovery_logs_provider.dart';
 import 'package:localsend_app/provider/network/pending_send_provider.dart';
+import 'package:localsend_app/util/native/android_share_shortcuts.dart';
 import 'package:localsend_app/util/native/windows_device_cache.dart';
 import 'package:localsend_isolates/isolate.dart';
 import 'package:localsend_isolates/model/device.dart';
@@ -29,11 +30,20 @@ final ReduxProvider<NearbyDevicesService, NearbyDevicesState> nearbyDevicesProvi
     );
   },
   onChanged: (_, next, ref) {
+    final favorites = ref.read(favoritesProvider);
+    final known = ref.read(knownDevicesProvider);
     unawaited(
       syncWindowsDeviceCache(
-        favorites: ref.read(favoritesProvider),
+        favorites: favorites,
         nearbyDevices: next.devices,
-        knownDevices: ref.read(knownDevicesProvider),
+        knownDevices: known,
+      ),
+    );
+    unawaited(
+      syncAndroidShareShortcuts(
+        favorites: favorites,
+        nearbyDevices: next.devices,
+        knownDevices: known,
       ),
     );
   },

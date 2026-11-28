@@ -5,6 +5,7 @@ import 'package:file_selector/file_selector.dart' show openFiles;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:localsend_app/config/init.dart' show androidShareAutoCloseProvider;
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/cross_file.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
@@ -253,10 +254,10 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
     }
   }
 
-  Future<void> _dispatchSend(Device target, List<CrossFile> files) async {
+  Future<void> _dispatchSend(Device target, List<CrossFile> files, {bool suppressSnackbar = false}) async {
     final busy = ref.read(sendProvider).values.any((s) => s.status == SessionStatus.sending || s.status == SessionStatus.waiting);
     final queued = await ref.notifier(pendingSendProvider).enqueue(target: target, files: files);
-    if (queued && mounted) {
+    if (queued && mounted && !suppressSnackbar) {
       context.showSnackBar(
         busy
             ? 'Queued for ${target.alias} — will send after current transfer finishes'
@@ -268,9 +269,16 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
   Future<void> _sendToDeviceStraight(Device target) async {
     final queued = ref.read(selectedSendingFilesProvider);
     if (queued.isNotEmpty) {
+      final shouldAutoClose = defaultTargetPlatform == TargetPlatform.android && ref.read(androidShareAutoCloseProvider);
       final files = List<CrossFile>.of(queued);
       ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction());
-      await _dispatchSend(target, files);
+      if (shouldAutoClose) {
+        ref.notifier(androidShareAutoCloseProvider).set(false);
+      }
+      await _dispatchSend(target, files, suppressSnackbar: shouldAutoClose);
+      if (shouldAutoClose) {
+        unawaited(android_channel.moveTaskToBackAndroid());
+      }
       return;
     }
 
@@ -436,7 +444,10 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
         onRefresh: _refreshDevices,
         onOpenHistory: _openHistory,
         onOpenSettings: _openSettings,
-        onClearSelectedFiles: () => ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction()),
+        onClearSelectedFiles: () {
+          ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction());
+          ref.notifier(androidShareAutoCloseProvider).set(false);
+        },
         onTapDevice: (entry) => _sendToDeviceStraight(entry.device),
         onToggleFavorite: _toggleFavorite,
         onSecondaryTapDevice: (entry, pos) => unawaited(_showDesktopDeviceMenu(context, entry, pos)),
@@ -595,7 +606,10 @@ class _LanDropHomeViewState extends State<LanDropHomeView> with Refena {
             sendSessions: sendSessions,
             pendingSends: pendingSends,
             history: history,
-            onClearSelectedFiles: () => ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction()),
+            onClearSelectedFiles: () {
+              ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction());
+              ref.notifier(androidShareAutoCloseProvider).set(false);
+            },
             onSendFiles: () {
               if (selectedDevice != null) {
                 unawaited(_sendToDeviceStraight(selectedDevice.device));

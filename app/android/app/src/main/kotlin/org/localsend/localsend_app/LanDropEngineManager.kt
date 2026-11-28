@@ -6,13 +6,22 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Person
 import android.content.BroadcastReceiver
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
 import android.database.Cursor
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.drawable.Icon
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.MediaScannerConnection
@@ -59,6 +68,9 @@ private const val API_LEVEL_ANDROID_17 = 37
 
 object LanDropEngineManager {
     const val ENGINE_ID = "landrop_engine"
+    const val SHORTCUT_ID_PREFIX = "device_"
+    private const val SHARE_TARGET_CATEGORY = "org.localsend.localsend_app.category.SHARE_TARGET"
+    private const val MAX_CUSTOM_SOUND_MS = 5000L
 
     private lateinit var appContext: Context
     private var activityRef: WeakReference<MainActivity>? = null
@@ -66,6 +78,12 @@ object LanDropEngineManager {
     private var pendingResult: MethodChannel.Result? = null
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var cancelReceiverRegistered: Boolean = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var activeMediaPlayer: MediaPlayer? = null
+    private var stopSoundRunnable: Runnable? = null
+
+    @Volatile
+    var pendingDirectShareFingerprint: String? = null
 
     private val cancelTransferReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -231,6 +249,24 @@ object LanDropEngineManager {
                 "shareIntentReady" -> {
                     shareIntentReady = true
                     activityRef?.get()?.flushPendingShareIntents()
+                    result.success(null)
+                }
+
+                "consumeDirectShareTarget" -> {
+                    val fp = pendingDirectShareFingerprint
+                    pendingDirectShareFingerprint = null
+                    result.success(fp)
+                }
+
+                "moveTaskToBack" -> {
+                    activityRef?.get()?.moveTaskToBack(true)
+                    result.success(null)
+                }
+
+                "updateShareShortcuts" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val devices = call.argument<List<Map<String, Any?>>>("devices") ?: emptyList()
+                    updateShareShortcuts(devices)
                     result.success(null)
                 }
 
@@ -520,7 +556,20 @@ object LanDropEngineManager {
 
     private fun playCompletionSound(path: String) {
         try {
+            stopSoundRunnable?.let { mainHandler.removeCallbacks(it) }
+            stopSoundRunnable = null
+            activeMediaPlayer?.let { prev ->
+                runCatching {
+                    if (prev.isPlaying) {
+                        prev.stop()
+                    }
+                }
+                runCatching { prev.release() }
+            }
+            activeMediaPlayer = null
+
             val player = MediaPlayer()
+            activeMediaPlayer = player
             player.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
@@ -528,16 +577,136 @@ object LanDropEngineManager {
                     .build()
             )
             player.setDataSource(path)
-            player.setOnCompletionListener { mp -> mp.release() }
+            player.setOnCompletionListener { mp ->
+                stopSoundRunnable?.let { mainHandler.removeCallbacks(it) }
+                stopSoundRunnable = null
+                if (activeMediaPlayer === mp) {
+                    activeMediaPlayer = null
+                }
+                runCatching { mp.release() }
+            }
             player.setOnErrorListener { mp, _, _ ->
-                mp.release()
+                stopSoundRunnable?.let { mainHandler.removeCallbacks(it) }
+                stopSoundRunnable = null
+                if (activeMediaPlayer === mp) {
+                    activeMediaPlayer = null
+                }
+                runCatching { mp.release() }
                 true
             }
             player.prepareAsync()
-            player.setOnPreparedListener { mp -> mp.start() }
+            player.setOnPreparedListener { mp ->
+                if (activeMediaPlayer !== mp) {
+                    runCatching { mp.release() }
+                    return@setOnPreparedListener
+                }
+                mp.start()
+                val cutoff = Runnable {
+                    if (activeMediaPlayer === mp) {
+                        activeMediaPlayer = null
+                        stopSoundRunnable = null
+                        runCatching {
+                            if (mp.isPlaying) {
+                                mp.stop()
+                            }
+                        }
+                        runCatching { mp.release() }
+                    }
+                }
+                stopSoundRunnable = cutoff
+                mainHandler.postDelayed(cutoff, MAX_CUSTOM_SOUND_MS)
+            }
         } catch (_: Exception) {
             // Audio feedback must never break file transfers.
         }
+    }
+
+    private fun updateShareShortcuts(devices: List<Map<String, Any?>>) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return
+        }
+        try {
+            val sm = appContext.getSystemService(ShortcutManager::class.java) ?: return
+            val limit = sm.maxShortcutCountPerActivity.coerceIn(1, 4)
+            val shortcuts = mutableListOf<ShortcutInfo>()
+            val desiredIds = mutableSetOf<String>()
+
+            for ((index, item) in devices.take(limit).withIndex()) {
+                val fingerprint = (item["fingerprint"] as? String)?.trim() ?: continue
+                if (fingerprint.isEmpty()) {
+                    continue
+                }
+                val alias = ((item["alias"] as? String)?.trim().orEmpty()).ifEmpty { "Device" }
+                val deviceType = (item["deviceType"] as? String)?.trim().orEmpty()
+                val shortcutId = "$SHORTCUT_ID_PREFIX$fingerprint"
+                desiredIds.add(shortcutId)
+
+                val launchIntent = Intent(appContext, MainActivity::class.java).apply {
+                    action = Intent.ACTION_MAIN
+                }
+                val info = ShortcutInfo.Builder(appContext, shortcutId)
+                    .setShortLabel(alias)
+                    .setLongLabel(alias)
+                    .setLongLived(true)
+                    .setCategories(setOf(SHARE_TARGET_CATEGORY))
+                    .setPerson(Person.Builder().setName(alias).build())
+                    .setIcon(createShortcutIcon(alias, deviceType))
+                    .setRank(index)
+                    .setIntent(launchIntent)
+                    .build()
+                shortcuts.add(info)
+            }
+
+            val staleIds = sm.dynamicShortcuts
+                .map { it.id }
+                .filter { it.startsWith(SHORTCUT_ID_PREFIX) && !desiredIds.contains(it) }
+            if (staleIds.isNotEmpty()) {
+                sm.removeDynamicShortcuts(staleIds)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                for (info in shortcuts.asReversed()) {
+                    sm.pushDynamicShortcut(info)
+                }
+            } else {
+                sm.dynamicShortcuts = shortcuts
+            }
+        } catch (_: Exception) {
+            // Share shortcut registration must never break discovery or transfers.
+        }
+    }
+
+    private fun createShortcutIcon(alias: String, deviceType: String): Icon {
+        val size = 108
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val bgColor = when (deviceType.lowercase(Locale.ROOT)) {
+            "desktop", "laptop" -> Color.parseColor("#0F766E")
+            "mobile", "tablet" -> Color.parseColor("#1D4ED8")
+            else -> Color.parseColor("#334155")
+        }
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = bgColor
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, bgPaint)
+
+        val trimmed = alias.trim()
+        val initial = if (trimmed.isNotEmpty()) {
+            trimmed.substring(0, 1).uppercase(Locale.ROOT)
+        } else {
+            "L"
+        }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 46f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
+        val textY = size / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
+        canvas.drawText(initial, size / 2f, textY, textPaint)
+        return Icon.createWithAdaptiveBitmap(bitmap)
     }
 
     private fun handleScanFile(call: MethodCall, result: MethodChannel.Result) {

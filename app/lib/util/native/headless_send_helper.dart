@@ -129,24 +129,15 @@ Future<List<CrossFile>> loadPathsAsCrossFiles(List<String> paths) async {
   return files;
 }
 
-Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
-  final files = await loadPathsAsCrossFiles(request.paths);
-  if (files.isEmpty) {
-    _logger.warning('No readable files found for --send-to ${request.fingerprint}');
-    return;
-  }
-
+Future<Device?> resolveTargetDeviceByFingerprint(Ref ref, String fingerprint) async {
   final settings = ref.read(settingsProvider);
-  if (!settings.silentCompletion && checkPlatformHasTray()) {
-    await showFromTray();
-  }
 
-  Device? target = ref.read(nearbyDevicesProvider).devices[request.fingerprint];
+  Device? target = ref.read(nearbyDevicesProvider).devices[fingerprint];
   if (target == null) {
     ref.redux(nearbyDevicesProvider).dispatch(StartMulticastScan());
     for (int i = 0; i < 17; i++) {
       await Future.delayed(const Duration(milliseconds: 150));
-      target = ref.read(nearbyDevicesProvider).devices[request.fingerprint];
+      target = ref.read(nearbyDevicesProvider).devices[fingerprint];
       if (target != null) {
         break;
       }
@@ -154,7 +145,7 @@ Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
   }
 
   if (target == null) {
-    final fav = ref.read(favoritesProvider).firstWhereOrNull((e) => e.fingerprint == request.fingerprint);
+    final fav = ref.read(favoritesProvider).firstWhereOrNull((e) => e.fingerprint == fingerprint);
     if (fav != null) {
       target = Device(
         signalingId: null,
@@ -172,10 +163,26 @@ Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
         ],
       );
     } else {
-      target = ref.read(knownDevicesProvider).firstWhereOrNull((e) => e.fingerprint == request.fingerprint)?.toDevice();
+      target = ref.read(knownDevicesProvider).firstWhereOrNull((e) => e.fingerprint == fingerprint)?.toDevice();
     }
   }
 
+  return target;
+}
+
+Future<void> executeHeadlessSend(Ref ref, SendToRequest request) async {
+  final files = await loadPathsAsCrossFiles(request.paths);
+  if (files.isEmpty) {
+    _logger.warning('No readable files found for --send-to ${request.fingerprint}');
+    return;
+  }
+
+  final settings = ref.read(settingsProvider);
+  if (!settings.silentCompletion && checkPlatformHasTray()) {
+    await showFromTray();
+  }
+
+  final target = await resolveTargetDeviceByFingerprint(ref, request.fingerprint);
   if (target == null) {
     _logger.warning('Target device ${request.fingerprint} is unreachable on the local network');
     if (checkPlatformHasTray()) {
