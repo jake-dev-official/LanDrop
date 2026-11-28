@@ -123,7 +123,7 @@ class ReceiveController {
           endTime: null,
           destinationDirectory: destinationDir,
           cacheDirectory: cacheDir,
-          saveToGallery: checkPlatformWithGallery() && settings.saveToGallery && files.values.every((f) => !f.fileName.contains('/')),
+          saveToGallery: false,
           createdDirectories: {},
         ),
       ),
@@ -135,6 +135,10 @@ class ReceiveController {
           sessionId: sessionId,
           statuses: {for (final file in files.values) file.id: FileStatus.queue},
         );
+
+    if (settings.playCompletionSound) {
+      unawaited(playTransferIncomingSound());
+    }
 
     bool quickSave = settings.quickSave && server.getState().session?.isMessageRequest != true;
     final quickSaveFromFavorites = settings.quickSaveFromFavorites && server.getState().session?.isMessageRequest != true;
@@ -462,12 +466,7 @@ class ReceiveController {
       );
       final settings = server.ref.read(settingsProvider);
       if (!hasError && settings.playCompletionSound) {
-        unawaited(
-          playTransferFinishSound(
-            preset: settings.soundPreset,
-            customPath: settings.customSoundPath,
-          ),
-        );
+        unawaited(playTransferFinishSound());
       }
       if (checkPlatform([TargetPlatform.android])) {
         _lastAndroidProgressNotif = null;

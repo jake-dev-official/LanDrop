@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:localsend_app/config/refena.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/persistence/known_device.dart';
@@ -156,48 +154,9 @@ void main() {
   });
 
   group('transfer sounds', () {
-    test('resolveTransferSoundAsset maps defaults and presets cleanly', () {
-      expect(resolveTransferSoundAsset(preset: 'default'), 'assets/sound/marimba_lite.wav');
-      expect(resolveTransferSoundAsset(preset: 'classic'), 'assets/sound/default.wav');
-      expect(resolveTransferSoundAsset(preset: 'pop'), 'assets/sound/pop.wav');
-      expect(resolveTransferSoundAsset(preset: 'blip'), 'assets/sound/blip_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'chime'), 'assets/sound/chime_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'ding'), 'assets/sound/ding_done.wav');
-      expect(resolveTransferSoundAsset(preset: 'unknown'), 'assets/sound/marimba_lite.wav');
-    });
-
-    test('transferSoundPresetLabel returns readable labels', () {
-      expect(
-        transferSoundPresets.map(transferSoundPresetLabel).toList(),
-        ['Default', 'Classic', 'Pop', 'Blip', 'Chime', 'Ding', 'Custom file'],
-      );
-    });
-
-    test('estimateWavDurationSeconds computes WAV length and ignores non-WAV bytes', () {
-      Uint8List buildWav({required int byteRate, required int dataSize}) {
-        final bytes = Uint8List(44);
-        final bd = ByteData.sublistView(bytes);
-        bytes.setAll(0, 'RIFF'.codeUnits);
-        bd.setUint32(4, 36 + dataSize, Endian.little);
-        bytes.setAll(8, 'WAVE'.codeUnits);
-        bytes.setAll(12, 'fmt '.codeUnits);
-        bd.setUint32(16, 16, Endian.little);
-        bd.setUint16(20, 1, Endian.little); // PCM
-        bd.setUint16(22, 2, Endian.little); // stereo
-        bd.setUint32(24, 44100, Endian.little);
-        bd.setUint32(28, byteRate, Endian.little);
-        bd.setUint16(32, 4, Endian.little);
-        bd.setUint16(34, 16, Endian.little);
-        bytes.setAll(36, 'data'.codeUnits);
-        bd.setUint32(40, dataSize, Endian.little);
-        return bytes;
-      }
-
-      // 44100 Hz stereo 16-bit = 176400 B/s; 2.5s = 441000 bytes
-      expect(estimateWavDurationSeconds(buildWav(byteRate: 176400, dataSize: 441000)), closeTo(2.5, 0.001));
-      // 6.0s > 5s cap
-      expect(estimateWavDurationSeconds(buildWav(byteRate: 176400, dataSize: 1058400)), closeTo(6.0, 0.001));
-      expect(estimateWavDurationSeconds(Uint8List.fromList([1, 2, 3, 4])), isNull);
+    test('uses bundled incoming ping and completion marimba assets', () {
+      expect(incomingSoundAsset, 'assets/sound/incoming_ping.wav');
+      expect(completeSoundAsset, 'assets/sound/complete_marimba.wav');
     });
   });
 

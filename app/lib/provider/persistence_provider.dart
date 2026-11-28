@@ -377,13 +377,7 @@ class PersistenceService {
     await _prefs.setString(_themeKey, theme.name);
   }
 
-  ColorMode getColorMode() {
-    final value = _prefs.getString(_colorKey);
-    if (value == null) {
-      return ColorMode.system;
-    }
-    return ColorMode.values.firstWhereOrNull((color) => color.name == value) ?? ColorMode.system;
-  }
+  ColorMode getColorMode() => ColorMode.localsend;
 
   Future<void> setColorMode(ColorMode color) async {
     await _prefs.setString(_colorKey, color.name);
@@ -510,9 +504,7 @@ class PersistenceService {
     }
   }
 
-  bool isSaveToGallery() {
-    return _prefs.getBool(_saveToGallery) ?? true;
-  }
+  bool isSaveToGallery() => false;
 
   Future<void> setSaveToGallery(bool saveToGallery) async {
     await _prefs.setBool(_saveToGallery, saveToGallery);

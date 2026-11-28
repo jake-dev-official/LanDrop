@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
-import 'package:localsend_app/model/persistence/color_mode.dart';
 import 'package:localsend_app/pages/tabs/settings_tab_controller.dart';
 import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
@@ -21,7 +20,6 @@ import 'package:localsend_app/widget/dialogs/quick_save_notice.dart';
 import 'package:localsend_app/widget/dialogs/text_field_with_actions.dart';
 import 'package:localsend_app/widget/responsive_list_view.dart';
 import 'package:localsend_isolates/util/transfer_notification.dart';
-import 'package:path/path.dart' as p;
 import 'package:refena_flutter/refena_flutter.dart';
 
 class SettingsTab extends StatelessWidget {
@@ -100,20 +98,6 @@ class SettingsTab extends StatelessWidget {
                     onChanged: (theme) => vm.onChangeTheme(context, theme),
                   ),
                 ),
-                _SettingsEntry(
-                  label: t.settingsTab.general.color,
-                  child: CustomDropdownButton<ColorMode>(
-                    value: vm.settings.colorMode,
-                    items: vm.colorModes.map((colorMode) {
-                      return DropdownMenuItem(
-                        value: colorMode,
-                        alignment: Alignment.center,
-                        child: Text(colorMode.humanName, overflow: TextOverflow.ellipsis),
-                      );
-                    }).toList(),
-                    onChanged: (colorMode) => vm.onChangeColorMode(context, colorMode),
-                  ),
-                ),
                 _BooleanEntry(
                   label: t.settingsTab.receive.quickSave,
                   value: vm.settings.quickSave,
@@ -143,102 +127,20 @@ class SettingsTab extends StatelessWidget {
                   },
                 ),
                 _BooleanEntry(
-                  label: 'Receive sound',
-                  description: 'Play a sound when files finish arriving.',
+                  label: 'Sounds',
+                  description: 'Play sound before and after transfer.',
                   value: vm.settings.playCompletionSound,
                   onChanged: (b) async {
                     await ref.notifier(settingsProvider).setPlayCompletionSound(b);
                     if (b) {
-                      unawaited(
-                        playTransferFinishSound(
-                          preset: vm.settings.soundPreset,
-                          customPath: vm.settings.customSoundPath,
-                          respectStartGap: false,
-                        ),
-                      );
+                      unawaited(playTransferFinishSound(respectIncomingGap: false));
                     }
                   },
                 ),
-                if (vm.settings.playCompletionSound)
-                  _SettingsEntry(
-                    label: 'Notification sound',
-                    child: CustomDropdownButton<String>(
-                      value: transferSoundPresets.contains(vm.settings.soundPreset) ? vm.settings.soundPreset : 'default',
-                      items: transferSoundPresets.map((preset) {
-                        return DropdownMenuItem(
-                          value: preset,
-                          alignment: Alignment.center,
-                          child: Text(transferSoundPresetLabel(preset), overflow: TextOverflow.ellipsis),
-                        );
-                      }).toList(),
-                      onChanged: (preset) async {
-                        if (preset == 'custom') {
-                          String? customPath = vm.settings.customSoundPath;
-                          if (customPath == null || customPath.isEmpty) {
-                            try {
-                              customPath = await pickAndSaveCustomSoundFile();
-                            } on FormatException catch (e) {
-                              if (context.mounted) {
-                                context.showSnackBar(e.message);
-                              }
-                              return;
-                            }
-                            if (customPath == null) {
-                              return;
-                            }
-                            await ref.notifier(settingsProvider).setCustomSoundPath(customPath);
-                          }
-                          await ref.notifier(settingsProvider).setSoundPreset('custom');
-                          unawaited(
-                            playTransferFinishSound(
-                              preset: 'custom',
-                              customPath: customPath,
-                              respectStartGap: false,
-                            ),
-                          );
-                          return;
-                        }
-                        await ref.notifier(settingsProvider).setSoundPreset(preset);
-                        unawaited(
-                          playTransferFinishSound(
-                            preset: preset,
-                            respectStartGap: false,
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                if (vm.settings.playCompletionSound && vm.settings.soundPreset == 'custom')
-                  _ButtonEntry(
-                    label: 'Custom sound file',
-                    buttonLabel: (vm.settings.customSoundPath?.isNotEmpty ?? false) ? p.basename(vm.settings.customSoundPath!) : 'Choose file',
-                    onTap: () async {
-                      final String? picked;
-                      try {
-                        picked = await pickAndSaveCustomSoundFile();
-                      } on FormatException catch (e) {
-                        if (context.mounted) {
-                          context.showSnackBar(e.message);
-                        }
-                        return;
-                      }
-                      if (picked == null) {
-                        return;
-                      }
-                      await ref.notifier(settingsProvider).setCustomSoundPath(picked);
-                      unawaited(
-                        playTransferFinishSound(
-                          preset: 'custom',
-                          customPath: picked,
-                          respectStartGap: false,
-                        ),
-                      );
-                    },
-                  ),
                 if (checkPlatform([TargetPlatform.android]))
                   _BooleanEntry(
-                    label: 'Always-on background receiver',
-                    description: 'Keep a silent notification so LanDrop receives files while closed.',
+                    label: 'Receive in background',
+                    description: 'Receive files even when LanDrop is closed.',
                     value: vm.settings.backgroundKeepAlive,
                     onChanged: (b) async {
                       await ref.notifier(settingsProvider).setBackgroundKeepAlive(b);
@@ -281,14 +183,6 @@ class SettingsTab extends StatelessWidget {
                         child: Text(vm.settings.destination ?? t.settingsTab.receive.downloads, style: Theme.of(context).textTheme.titleMedium),
                       ),
                     ),
-                  ),
-                if (checkPlatformWithGallery())
-                  _BooleanEntry(
-                    label: t.settingsTab.receive.saveToGallery,
-                    value: vm.settings.saveToGallery,
-                    onChanged: (b) async {
-                      await ref.notifier(settingsProvider).setSaveToGallery(b);
-                    },
                   ),
               ],
             ),
@@ -391,42 +285,6 @@ class _BooleanEntry extends StatelessWidget {
   }
 }
 
-/// A specialized version of [_SettingsEntry].
-class _ButtonEntry extends StatelessWidget {
-  final String label;
-  final String buttonLabel;
-  final void Function() onTap;
-
-  const _ButtonEntry({
-    required this.label,
-    required this.buttonLabel,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _SettingsEntry(
-      label: label,
-      child: TextButton(
-        style: TextButton.styleFrom(
-          backgroundColor: Theme.of(context).inputDecorationTheme.fillColor,
-          shape: RoundedRectangleBorder(borderRadius: Theme.of(context).inputDecorationTheme.borderRadius),
-          foregroundColor: Theme.of(context).colorScheme.onSurface,
-        ),
-        onPressed: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 5),
-          child: Text(
-            buttonLabel,
-            style: Theme.of(context).textTheme.titleMedium,
-            textAlign: TextAlign.center,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _SettingsSection extends StatelessWidget {
   final String title;
   final List<Widget> children;
@@ -469,17 +327,5 @@ extension on ThemeMode {
       case ThemeMode.dark:
         return t.settingsTab.general.brightnessOptions.dark;
     }
-  }
-}
-
-extension on ColorMode {
-  String get humanName {
-    return switch (this) {
-      ColorMode.system => t.settingsTab.general.colorOptions.system,
-      ColorMode.localsend => t.appName,
-      ColorMode.oled => t.settingsTab.general.colorOptions.oled,
-      ColorMode.yaru => 'Yaru',
-      ColorMode.custom => t.settingsTab.general.colorOptions.custom,
-    };
   }
 }
