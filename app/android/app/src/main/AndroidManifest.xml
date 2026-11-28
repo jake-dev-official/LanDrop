@@ -78,6 +78,14 @@
 
         </activity>
 
+        <activity
+            android:name=".DirectShareActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
+
         <!-- Quick tile to launch the app -->
         <service
             android:name=".QuickTileService"

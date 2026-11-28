@@ -83,23 +83,12 @@ Future<void> openContentUri({
   });
 }
 
-/// Tells MainActivity that the Dart side is now subscribed to the share_handler media stream,
-/// so share intents that were held back during app start can be replayed.
+/// Tells LanDropEngineManager that the Dart side is ready to receive incoming shares.
 Future<void> flushPendingShareIntentsAndroid() async {
   try {
     await _methodChannel.invokeMethod('shareIntentReady');
   } catch (e) {
     _logger.warning('Could not flush pending share intents', e);
-  }
-}
-
-/// Returns and clears the target device fingerprint if launched via an Android Direct Share shortcut.
-Future<String?> consumeDirectShareTargetAndroid() async {
-  try {
-    return await _methodChannel.invokeMethod<String>('consumeDirectShareTarget');
-  } catch (e) {
-    _logger.warning('Could not read direct share target', e);
-    return null;
   }
 }
 
@@ -121,6 +110,66 @@ Future<void> updateShareShortcutsAndroid(List<Map<String, dynamic>> devices) asy
   } catch (e) {
     _logger.warning('Could not update Android share shortcuts', e);
   }
+}
+
+class AndroidIncomingSharePayload {
+  final String? directShareFingerprint;
+  final bool fromDirectShare;
+  final String? text;
+  final List<FileInfo> files;
+
+  const AndroidIncomingSharePayload({
+    required this.directShareFingerprint,
+    required this.fromDirectShare,
+    required this.text,
+    required this.files,
+  });
+}
+
+void Function()? _cancelTransferHandler;
+void Function(AndroidIncomingSharePayload payload)? _incomingShareHandler;
+bool _methodCallHandlerAttached = false;
+
+void _ensureMethodCallHandler() {
+  if (_methodCallHandlerAttached) {
+    return;
+  }
+  _methodCallHandlerAttached = true;
+  _methodChannel.setMethodCallHandler((call) async {
+    switch (call.method) {
+      case 'cancelActiveTransfer':
+        _cancelTransferHandler?.call();
+      case 'incomingShare':
+        final handler = _incomingShareHandler;
+        if (handler == null) {
+          return;
+        }
+        final raw = (call.arguments as Map?)?.cast<String, dynamic>();
+        if (raw == null) {
+          return;
+        }
+        final rawFiles = (raw['files'] as List?) ?? const [];
+        final files = rawFiles.whereType<Map>().map((item) => FileInfoMapper.fromJson(item.cast<String, dynamic>())).toList();
+        handler(
+          AndroidIncomingSharePayload(
+            directShareFingerprint: raw['directShareFingerprint'] as String?,
+            fromDirectShare: raw['fromDirectShare'] == true,
+            text: raw['text'] as String?,
+            files: files,
+          ),
+        );
+    }
+  });
+}
+
+void registerAndroidCancelTransferHandler(void Function() onCancel) {
+  _cancelTransferHandler = onCancel;
+  _ensureMethodCallHandler();
+}
+
+void registerAndroidIncomingShareHandler(void Function(AndroidIncomingSharePayload payload) onShare) {
+  _incomingShareHandler = onShare;
+  _ensureMethodCallHandler();
 }
 
 Future<void> openGallery() async {
@@ -196,14 +245,6 @@ Future<void> cancelTransferProgressNotificationAndroid() async {
   } catch (e) {
     _logger.warning('Could not cancel transfer progress notification', e);
   }
-}
-
-void registerAndroidCancelTransferHandler(void Function() onCancel) {
-  _methodChannel.setMethodCallHandler((call) async {
-    if (call.method == 'cancelActiveTransfer') {
-      onCancel();
-    }
-  });
 }
 
 @MappableClass()

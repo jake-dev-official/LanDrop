@@ -89,6 +89,7 @@ final androidShareAutoCloseProvider = NotifierProvider<AndroidShareAutoCloseNoti
 );
 bool _discoveryListenerStarted = false;
 bool _androidCancelHandlerRegistered = false;
+bool _androidHadIncomingShare = false;
 bool _cacheClearedOnce = false;
 Future<void>? _isolatesReadyFuture;
 
@@ -260,6 +261,14 @@ Future<RefenaContainer> preInit(List<String> args) async {
           container.notifier(sendProvider).cancelSession(session.sessionId);
         }
       });
+      registerAndroidIncomingShareHandler((payload) {
+        unawaited(
+          container.global.dispatchAsync(
+            _HandleAndroidIncomingShareAction(payload: payload),
+          ),
+        );
+      });
+      unawaited(flushPendingShareIntentsAndroid());
     }
 
     Future<void> bootstrapAndroid() async {
@@ -304,9 +313,9 @@ StreamSubscription? _sharedMediaSubscription;
 Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
   await updateSystemOverlayStyle(context);
 
-  bool hasInitialShare = false;
+  bool hasInitialShare = _androidHadIncomingShare;
 
-  if (checkPlatformCanReceiveShareIntent()) {
+  if (checkPlatformCanReceiveShareIntent() && !checkPlatform([TargetPlatform.android])) {
     final shareHandler = ShareHandlerPlatform.instance;
 
     if (appStart) {
@@ -331,12 +340,6 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
         ),
       );
     });
-
-    if (checkPlatform([TargetPlatform.android])) {
-      // Both messages above travel through the same messenger in order, so the stream is
-      // guaranteed to be attached natively before MainActivity replays held-back intents.
-      await flushPendingShareIntentsAndroid();
-    }
   }
 
   if (checkPlatform([TargetPlatform.android])) {
@@ -483,6 +486,80 @@ Future<void> postInit(BuildContext context, Ref ref, bool appStart) async {
   // [FOSS_REMOVE_END]
 }
 
+class _HandleAndroidIncomingShareAction extends AsyncGlobalAction {
+  final AndroidIncomingSharePayload payload;
+
+  _HandleAndroidIncomingShareAction({
+    required this.payload,
+  });
+
+  @override
+  Future<void> reduce() async {
+    _androidHadIncomingShare = true;
+    final message = payload.text;
+    final directFp = payload.directShareFingerprint;
+
+    if (directFp != null && directFp.isNotEmpty) {
+      final incomingFiles = <CrossFile>[
+        if (message != null && message.trim().isNotEmpty)
+          () {
+            final bytes = utf8.encode(message);
+            return CrossFile(
+              name: '${_shareUuid.v4()}.txt',
+              fileType: FileType.text,
+              size: bytes.length,
+              thumbnail: null,
+              asset: null,
+              path: null,
+              bytes: bytes,
+              lastModified: null,
+              lastAccessed: null,
+            );
+          }(),
+        for (final file in payload.files) await CrossFileConverters.convertFileInfo(file),
+      ];
+
+      if (incomingFiles.isNotEmpty) {
+        await ensureIsolatesReady();
+        final target = await resolveTargetDeviceByFingerprint(ref, directFp);
+        if (target != null) {
+          ref.notifier(androidShareAutoCloseProvider).set(false);
+          await ref
+              .notifier(pendingSendProvider)
+              .enqueue(
+                target: target,
+                files: incomingFiles,
+                background: true,
+              );
+          if (!payload.fromDirectShare) {
+            await moveTaskToBackAndroid();
+          }
+          return;
+        }
+      }
+    }
+
+    if (message != null && message.trim().isNotEmpty) {
+      ref.redux(selectedSendingFilesProvider).dispatch(AddMessageAction(message: message));
+    }
+    if (payload.files.isNotEmpty) {
+      await ref
+          .redux(selectedSendingFilesProvider)
+          .dispatchAsync(
+            AddFilesAction(
+              files: payload.files,
+              converter: CrossFileConverters.convertFileInfo,
+            ),
+          );
+    }
+
+    if (ref.read(selectedSendingFilesProvider).isNotEmpty) {
+      ref.notifier(androidShareAutoCloseProvider).set(true);
+    }
+    ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
+  }
+}
+
 class _HandleShareIntentAction extends AsyncGlobalAction {
   final SharedMedia payload;
 
@@ -493,49 +570,6 @@ class _HandleShareIntentAction extends AsyncGlobalAction {
   @override
   Future<void> reduce() async {
     final message = payload.content;
-    final attachments = payload.attachments?.where((a) => a != null).cast<SharedAttachment>().toList() ?? const <SharedAttachment>[];
-
-    if (checkPlatform([TargetPlatform.android])) {
-      final directFp = await consumeDirectShareTargetAndroid();
-      if (directFp != null && directFp.isNotEmpty) {
-        final incomingFiles = <CrossFile>[
-          if (message != null && message.trim().isNotEmpty)
-            () {
-              final bytes = utf8.encode(message);
-              return CrossFile(
-                name: '${_shareUuid.v4()}.txt',
-                fileType: FileType.text,
-                size: bytes.length,
-                thumbnail: null,
-                asset: null,
-                path: null,
-                bytes: bytes,
-                lastModified: null,
-                lastAccessed: null,
-              );
-            }(),
-          for (final attachment in attachments) await CrossFileConverters.convertSharedAttachment(attachment),
-        ];
-
-        if (incomingFiles.isNotEmpty) {
-          await ensureIsolatesReady();
-          final target = await resolveTargetDeviceByFingerprint(ref, directFp);
-          if (target != null) {
-            ref.notifier(androidShareAutoCloseProvider).set(false);
-            await ref
-                .notifier(pendingSendProvider)
-                .enqueue(
-                  target: target,
-                  files: incomingFiles,
-                  background: true,
-                );
-            await moveTaskToBackAndroid();
-            return;
-          }
-        }
-      }
-    }
-
     if (message != null && message.trim().isNotEmpty) {
       ref.redux(selectedSendingFilesProvider).dispatch(AddMessageAction(message: message));
     }
@@ -543,14 +577,11 @@ class _HandleShareIntentAction extends AsyncGlobalAction {
         .redux(selectedSendingFilesProvider)
         .dispatchAsync(
           AddFilesAction(
-            files: attachments,
+            files: payload.attachments?.where((a) => a != null).cast<SharedAttachment>() ?? <SharedAttachment>[],
             converter: CrossFileConverters.convertSharedAttachment,
           ),
         );
 
-    if (checkPlatform([TargetPlatform.android]) && ref.read(selectedSendingFilesProvider).isNotEmpty) {
-      ref.notifier(androidShareAutoCloseProvider).set(true);
-    }
     ref.redux(homePageControllerProvider).dispatch(ChangeTabAction(HomeTab.send));
   }
 }

@@ -30,8 +30,12 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.system.Os
+import android.system.OsConstants
 import android.webkit.MimeTypeMap
 import com.pravera.flutter_foreground_task.service.ForegroundService
 import io.flutter.embedding.engine.FlutterEngine
@@ -71,6 +75,10 @@ object LanDropEngineManager {
     const val SHORTCUT_ID_PREFIX = "device_"
     private const val SHARE_TARGET_CATEGORY = "org.localsend.localsend_app.category.SHARE_TARGET"
     private const val MAX_CUSTOM_SOUND_MS = 5000L
+    private const val MAX_RETAINED_SHARE_FDS = 64
+    private const val RETAINED_SHARE_FD_TTL_MS = 15 * 60 * 1000L
+
+    private data class RetainedFd(val pfd: ParcelFileDescriptor, val createdAtMs: Long)
 
     private lateinit var appContext: Context
     private var activityRef: WeakReference<MainActivity>? = null
@@ -81,9 +89,9 @@ object LanDropEngineManager {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var activeMediaPlayer: MediaPlayer? = null
     private var stopSoundRunnable: Runnable? = null
-
-    @Volatile
-    var pendingDirectShareFingerprint: String? = null
+    private val shareLock = Any()
+    private val pendingNativeShares = mutableListOf<Map<String, Any?>>()
+    private val retainedShareFds = LinkedHashMap<String, RetainedFd>()
 
     private val cancelTransferReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -247,15 +255,8 @@ object LanDropEngineManager {
                 }
 
                 "shareIntentReady" -> {
-                    shareIntentReady = true
-                    activityRef?.get()?.flushPendingShareIntents()
+                    flushPendingNativeShares()
                     result.success(null)
-                }
-
-                "consumeDirectShareTarget" -> {
-                    val fp = pendingDirectShareFingerprint
-                    pendingDirectShareFingerprint = null
-                    result.success(fp)
                 }
 
                 "moveTaskToBack" -> {
@@ -709,6 +710,175 @@ object LanDropEngineManager {
         return Icon.createWithAdaptiveBitmap(bitmap)
     }
 
+    private fun flushPendingNativeShares() {
+        val toSend: List<Map<String, Any?>>
+        val channel: MethodChannel?
+        synchronized(shareLock) {
+            shareIntentReady = true
+            channel = methodChannel
+            toSend = pendingNativeShares.toList()
+            pendingNativeShares.clear()
+        }
+        if (channel != null && toSend.isNotEmpty()) {
+            mainHandler.post {
+                for (payload in toSend) {
+                    channel.invokeMethod("incomingShare", payload)
+                }
+            }
+        }
+    }
+
+    fun handleIncomingShareIntent(context: Context, intent: Intent, fromDirectShare: Boolean) {
+        val shortcutId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID)
+        } else {
+            null
+        }
+        val directShareFingerprint = if (shortcutId != null && shortcutId.startsWith(SHORTCUT_ID_PREFIX)) {
+            shortcutId.removePrefix(SHORTCUT_ID_PREFIX)
+        } else {
+            null
+        }
+
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+        val uris = extractShareUris(intent)
+        val fileMaps = uris.mapNotNull { uri -> buildZeroCopyFileInfo(context, uri)?.toMap() }
+        if (text.isNullOrBlank() && fileMaps.isEmpty()) {
+            return
+        }
+
+        val payload = mapOf<String, Any?>(
+            "directShareFingerprint" to directShareFingerprint,
+            "fromDirectShare" to fromDirectShare,
+            "text" to text,
+            "files" to fileMaps,
+        )
+
+        val channelToSend: MethodChannel?
+        synchronized(shareLock) {
+            if (shareIntentReady && methodChannel != null) {
+                channelToSend = methodChannel
+            } else {
+                pendingNativeShares.add(payload)
+                channelToSend = null
+            }
+        }
+        if (channelToSend != null) {
+            mainHandler.post {
+                channelToSend.invokeMethod("incomingShare", payload)
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun extractShareUris(intent: Intent): List<Uri> {
+        val uris = LinkedHashSet<Uri>()
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.add(it) }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { uris.add(it) }
+            }
+        }
+        if (uris.isEmpty()) {
+            val clipData = intent.clipData
+            if (clipData != null) {
+                for (i in 0 until clipData.itemCount) {
+                    clipData.getItemAt(i).uri?.let { uris.add(it) }
+                }
+            }
+        }
+        return uris.toList()
+    }
+
+    private fun buildZeroCopyFileInfo(context: Context, uri: Uri): FileInfo? {
+        if (uri.scheme == ContentResolver.SCHEME_FILE) {
+            val path = uri.path ?: return null
+            val file = File(path)
+            if (!file.exists()) {
+                return null
+            }
+            val lastMod = if (file.lastModified() > 0L) file.lastModified().toRfc3339() else null
+            return FileInfo(
+                name = file.name.ifBlank { "file_${System.currentTimeMillis()}" },
+                size = file.length(),
+                uri = file.absolutePath,
+                lastModified = lastMod,
+            )
+        }
+
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) {
+            return null
+        }
+
+        val resolver = context.contentResolver
+        var displayName: String? = null
+        var size = -1L
+
+        runCatching {
+            resolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx != -1 && !cursor.isNull(nameIdx)) {
+                        displayName = cursor.getString(nameIdx)
+                    }
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx != -1 && !cursor.isNull(sizeIdx)) {
+                        size = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+        }
+
+        val pfd = runCatching { resolver.openFileDescriptor(uri, "r") }.getOrNull()
+        if (pfd != null) {
+            if (size <= 0L && pfd.statSize > 0L) {
+                size = pfd.statSize
+            }
+            retainShareFd(uri.toString(), pfd)
+        }
+
+        val finalName = if (!displayName.isNullOrBlank()) {
+            displayName!!
+        } else {
+            val mimeType = runCatching { resolver.getType(uri) }.getOrNull()
+            val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+            if (!ext.isNullOrBlank()) "file_${System.currentTimeMillis()}.$ext" else "file_${System.currentTimeMillis()}"
+        }
+
+        return FileInfo(
+            name = finalName,
+            size = size.coerceAtLeast(0L),
+            uri = uri.toString(),
+            lastModified = null,
+        )
+    }
+
+    private fun retainShareFd(uriKey: String, pfd: ParcelFileDescriptor) {
+        val now = System.currentTimeMillis()
+        synchronized(shareLock) {
+            retainedShareFds.remove(uriKey)?.let { old -> runCatching { old.pfd.close() } }
+            val expiredKeys = retainedShareFds.entries
+                .filter { now - it.value.createdAtMs > RETAINED_SHARE_FD_TTL_MS }
+                .map { it.key }
+            for (k in expiredKeys) {
+                retainedShareFds.remove(k)?.let { old -> runCatching { old.pfd.close() } }
+            }
+            while (retainedShareFds.size >= MAX_RETAINED_SHARE_FDS) {
+                val eldestKey = retainedShareFds.entries.firstOrNull()?.key ?: break
+                retainedShareFds.remove(eldestKey)?.let { old -> runCatching { old.pfd.close() } }
+            }
+            retainedShareFds[uriKey] = RetainedFd(pfd, now)
+        }
+    }
+
     private fun handleScanFile(call: MethodCall, result: MethodChannel.Result) {
         val path = call.argument<String>("path")
         if (path.isNullOrBlank() || !File(path).isAbsolute) {
@@ -738,23 +908,31 @@ object LanDropEngineManager {
             return
         }
 
-        try {
-            val parcelFileDescriptor = appContext.contentResolver.openFileDescriptor(uri, "r")
-            if (parcelFileDescriptor == null) {
-                result.error("OPEN_FAILED", "The content provider did not return a file descriptor", null)
-                return
-            }
-
+        val directPfd = runCatching { appContext.contentResolver.openFileDescriptor(uri, "r") }.getOrNull()
+        if (directPfd != null) {
             // Ownership of the detached descriptor is transferred to the caller. It must be
             // closed by Rust (or whichever native consumer receives it) after use.
-            parcelFileDescriptor.use {
+            directPfd.use {
                 result.success(it.detachFd())
             }
-        } catch (e: SecurityException) {
-            result.error("PERMISSION_DENIED", e.message ?: "Permission denied for content URI", null)
-        } catch (e: Exception) {
-            result.error("OPEN_FAILED", e.message ?: "Failed to open content URI", null)
+            return
         }
+
+        val retainedDup = synchronized(shareLock) {
+            val retained = retainedShareFds[uriString] ?: return@synchronized null
+            runCatching {
+                Os.lseek(retained.pfd.fileDescriptor, 0L, OsConstants.SEEK_SET)
+                ParcelFileDescriptor.dup(retained.pfd.fileDescriptor)
+            }.getOrNull()
+        }
+        if (retainedDup != null) {
+            retainedDup.use {
+                result.success(it.detachFd())
+            }
+            return
+        }
+
+        result.error("OPEN_FAILED", "Could not open content URI", null)
     }
 
     /// Creates a new file inside a SAF directory and opens it for writing.
