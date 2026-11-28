@@ -56,9 +56,6 @@
         <uap:LockScreen BadgeLogo="Images\BadgeLogo.png" Notification="badge"/>
       </uap:VisualElements>
       <Extensions>
-        <desktop:Extension Category="windows.startupTask" Executable="landrop.exe" EntryPoint="Windows.FullTrustApplication" uap10:Parameters="autostart">
-          <desktop:StartupTask TaskId="landrop" Enabled="false" DisplayName="LanDrop"/>
-        </desktop:Extension>
         <uap:Extension Category="windows.shareTarget">
           <uap:ShareTarget Description="Send to LanDrop">
             <uap:SupportedFileTypes>

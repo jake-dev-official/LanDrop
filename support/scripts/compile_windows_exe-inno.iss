@@ -76,6 +76,9 @@ Source: "{#PayloadDir}\Images\*"; DestDir: "{app}\Images"; Flags: ignoreversion;
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Check: IsDesktopShortcutChecked
 
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LanDrop"; ValueData: """{app}\{#MyAppExeName}"" --hidden"
+
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\inno_postinstall.ps1"" -Action InstallFirewall -AppDir ""{app}"""; Flags: runhidden waituntilterminated; StatusMsg: "Configuring local network access..."
 #ifndef SkipMsixHelper
